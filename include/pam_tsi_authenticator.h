@@ -27,4 +27,5 @@ typedef struct Params {
     const char *secret_filename;                    /* override por 'secret=', o NULL */
 } Params;
 
+
 #endif /* PAM_TSI_AUTHENTICATOR_H */

@@ -4,7 +4,7 @@
 CC      := gcc
 CFLAGS  := -fPIC -Wall -Wextra -Iinclude
 LDFLAGS := -shared
-LIBS    := -lpam
+LIBS := -lpam -lcotp -lgcrypt
 
 MODULE  := pam_tsi_authenticator.so
 SRC     := src/pam_tsi_authenticator.c
