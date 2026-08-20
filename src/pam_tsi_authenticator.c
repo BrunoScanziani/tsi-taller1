@@ -47,11 +47,11 @@ static int parse_args(pam_handle_t *pamh, int argc, const char **argv, Params *p
 {
     for (int i = 0; i < argc; ++i)
     {
-        if (strncmp(argv[i], "debug", 5) == 0)
+        if (strncmp(argv[i], "debug") == 0)
         {
             params->debug = 1;
         }
-        else if (strncmp(argv[i], "nullok", 6) == 0)
+        else if (strncmp(argv[i], "nullok") == 0)
         {
             params->nullok = NULLOK;
         }
@@ -106,17 +106,43 @@ static int get_uid_gid(pam_handle_t *pamh, uid_t *uid, gid_t *gid)
    Usa el override 'secret=' si se hY, si no <home>/SECRET_FILENAME. 0 OK, -1 error. */
 static int get_secret_path(uid_t uid, const Params *params, char **path_out)
 {
+    if (params->secret_filename != NULL)
+    {
+        *path_out = strdup(params->secret_filename);
+        return (*path_out != NULL) ? 0 : -1;
+    }
+    pwd_t *pwd;
+    int len;
+
+    pwd = getpwuid(uid);
+    if (!pwd)
+    {
+        return -1;
+    }
+    len = strlen(pwd->pw_dir) + 1 + strlen(SECRET_FILENAME) + 1;
+    *path_out = malloc(len);
+    if (*path_out == NULL)
+    {
+        return -1;
+    }
+    snprintf(*path_out, len, "%s/%s", pwd->pw_dir, SECRET_FILENAME);
+    return 0;
 }
 
 /* Baja la identidad de filesystem al usuario para no hacer cosas con root innecesariamente
    Guarda los valores previos para poder restaurar. 0 OK, -1 error. */
 static int decrease_privileges(gid_t gid, uid_t uid, gid_t *old_gid, uid_t *old_uid)
 {
+    *old_gid = getgid();
+    *old_uid = getuid();
+    return setresgid(gid, gid, gid) == 0 && setresuid(uid, uid, uid) == 0 ? 0 : -1;
 }
 
 /* Restaura la identidad de filesystem previa */
 static void restore_privileges(gid_t old_gid, uid_t old_uid)
 {
+    setresgid(old_gid, old_gid, old_gid);
+    setresuid(old_uid, old_uid, old_uid);
 }
 
 /* Lee el secreto desde 'path'.
@@ -124,6 +150,21 @@ static void restore_privileges(gid_t old_gid, uid_t old_uid)
    0 OK (incluso si no existe el archivo pero se deja pasar a los que no lo tengas), -1 error . */
 static int get_secret_file(const char *path, char *secret_out, size_t out_size, int *found)
 {
+    FILE *file = fopen(path, "r");
+    if (!file)
+    {
+        *found = 0;
+        return 0; // No hay error, solo que no se encontró el archivo
+    }
+
+    *found = 1;
+    if (fgets(secret_out, out_size, file) == NULL)
+    {
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    return 0;
 }
 
 /* Le solicita al usuario que ingrese el token y lo almacena en digits
@@ -143,7 +184,14 @@ static int validate_token(pam_handle_t *pamh, const Params *params, const char *
 int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
 
-    Params params;
+    Params params = {
+        .debug = 0,
+        .nullok = NULLERR,
+        .secret_filename = NULL,
+        .digits = DEFAULT_DIGITS,
+        .period = DEFAULT_PERIOD,
+        .window = DEFAULT_WINDOW};
+
     gid_t gid;
     uid_t uid;
     gid_t old_gid;
