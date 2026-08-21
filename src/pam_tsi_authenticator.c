@@ -170,14 +170,16 @@ static int get_secret_file(const char *path, char *secret_out, size_t out_size, 
 /* Le solicita al usuario que ingrese el token y lo almacena en digits
     0 OK, -1 error.
 */
-static int ask_for_token(pam_handle_t *pamh, Params *params, uint8_t *digits) {
-
+static int ask_for_token(pam_handle_t *pamh, Params *params, uint8_t *digits)
+{
+    return pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, NULL, "Ingrese el token de 2FA: ") == PAM_SUCCESS ? 0 : -1;
 };
 
 /* Valida el codigo ingresado por el usuario. valid = 1 si el TOTP es correcto.
     0 OK (ejecuto, no implica valid = 1), -1 error. */
 static int validate_token(pam_handle_t *pamh, const Params *params, const char *secret_b32, uint8_t *code, int *valid)
 {
+    return validate_token(secret_b32, code, params->window, valid);
 }
 
 /* Funcion principal que resuelve la autenticacion */
