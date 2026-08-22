@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <errno.h>
@@ -33,25 +34,17 @@
 /* ESTO PODRIA NO IR CREO */
 #include "tsi_authenticator.h"
 
-/* Tamanio de buffer recomendado para getpw*_r, queda en 4096 si no hay valor. */
-static long pw_bufsize(void)
-{
-    long n = sysconf(_SC_GETPW_R_SIZE_MAX); /* Tamanio sugerido para obtener datos del archov etc/passwd
-                                                teniendo en cuenta problemas de hilos */
-    return (n <= 0) ? 4096 : n;
-}
-
 /* Parsea los argumentos hacia Params.
    Devuelve 0 si OK, -1 si hay argumentos desconocidos. */
 static int parse_args(pam_handle_t *pamh, int argc, const char **argv, Params *params)
 {
     for (int i = 0; i < argc; ++i)
     {
-        if (strncmp(argv[i], "debug") == 0)
+        if (strncmp(argv[i], "debug", 5) == 0)
         {
             params->debug = 1;
         }
-        else if (strncmp(argv[i], "nullok") == 0)
+        else if (strncmp(argv[i], "nullok", 6) == 0)
         {
             params->nullok = NULLOK;
         }
@@ -111,7 +104,7 @@ static int get_secret_path(uid_t uid, const Params *params, char **path_out)
         *path_out = strdup(params->secret_filename);
         return (*path_out != NULL) ? 0 : -1;
     }
-    pwd_t *pwd;
+    struct passwd *pwd;
     int len;
 
     pwd = getpwuid(uid);
@@ -133,16 +126,34 @@ static int get_secret_path(uid_t uid, const Params *params, char **path_out)
    Guarda los valores previos para poder restaurar. 0 OK, -1 error. */
 static int decrease_privileges(gid_t gid, uid_t uid, gid_t *old_gid, uid_t *old_uid)
 {
-    *old_gid = getgid();
-    *old_uid = getuid();
-    return setresgid(gid, gid, gid) == 0 && setresuid(uid, uid, uid) == 0 ? 0 : -1;
+    *old_gid = getegid();
+    *old_uid = geteuid();
+
+    if (setegid(gid) != 0)
+    {
+        return -1;
+    }
+    if (seteuid(uid) != 0)
+    {
+        (void)setegid(*old_gid);
+        return -1;
+    }
+    return 0;
 }
 
 /* Restaura la identidad de filesystem previa */
-static void restore_privileges(gid_t old_gid, uid_t old_uid)
+static int restore_privileges(gid_t old_gid, uid_t old_uid)
 {
-    setresgid(old_gid, old_gid, old_gid);
-    setresuid(old_uid, old_uid, old_uid);
+    /* Primero recupera root; recién entonces puede restaurar el grupo. */
+    if (seteuid(old_uid) != 0)
+    {
+        return -1;
+    }
+    if (setegid(old_gid) != 0)
+    {
+        return -1;
+    }
+    return 0;
 }
 
 /* Lee el secreto desde 'path'.
@@ -163,28 +174,67 @@ static int get_secret_file(const char *path, char *secret_out, size_t out_size, 
         fclose(file);
         return -1;
     }
+    char *p = strchr(secret_out, '=');
+    if (p == NULL)
+    {
+        fclose(file);
+        return -1;
+    }
+
+    memmove(secret_out, p + 1, strlen(p + 1) + 1);
+    secret_out[strcspn(secret_out, "\r\n")] = '\0';
     fclose(file);
     return 0;
 }
 
 /* Le solicita al usuario que ingrese el token y lo almacena en digits
-    0 OK, -1 error.
-*/
-static int ask_for_token(pam_handle_t *pamh, Params *params, uint8_t *digits)
+    0 OK, -1 error.*/
+static int ask_for_token(pam_handle_t *pamh, Params *params, char *digits)
 {
-    return pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, NULL, "Ingrese el token de 2FA: ") == PAM_SUCCESS ? 0 : -1;
-};
+    (void)params;
+
+    char *token = NULL;
+    int rc = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &token, "Ingrese el token de 2FA: ");
+
+    if (rc != PAM_SUCCESS || token == NULL)
+        return -1;
+
+    if (strlen(token) != DEFAULT_DIGITS)
+    {
+        explicit_bzero(token, strlen(token));
+        free(token);
+        return -1;
+    }
+    for (size_t i = 0; i < DEFAULT_DIGITS; ++i)
+    {
+        if (!isdigit((unsigned char)token[i]))
+        {
+            explicit_bzero(token, strlen(token));
+            free(token);
+            return -1;
+        }
+    }
+
+    memcpy(digits, token, DEFAULT_DIGITS + 1);
+    explicit_bzero(token, strlen(token));
+    free(token);
+    return 0;
+}
 
 /* Valida el codigo ingresado por el usuario. valid = 1 si el TOTP es correcto.
     0 OK (ejecuto, no implica valid = 1), -1 error. */
-static int validate_token(pam_handle_t *pamh, const Params *params, const char *secret_b32, uint8_t *code, int *valid)
+static int validate_pam_token(pam_handle_t *pamh, const Params *params, const char *secret_b32, const char *code, int *valid)
 {
-    return validate_token(secret_b32, code, params->window, valid);
+    (void)pamh;
+    return validate_token(secret_b32, code, (unsigned)params->window, valid);
 }
 
 /* Funcion principal que resuelve la autenticacion */
 int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
+    (void)flags;
+    (void)argc;
+    (void)argv;
 
     Params params = {
         .debug = 0,
@@ -198,11 +248,13 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
     uid_t uid;
     gid_t old_gid;
     uid_t old_uid;
-    char *secret_path;
-    char secret_b32[SECRET_B32_MAX];
-    int found;
-    int valid;
-    uint8_t code[DEFAULT_DIGITS];
+    char *secret_path = NULL;
+    char secret_b32[SECRET_B32_MAX] = {0};
+    char code[DEFAULT_DIGITS + 1] = {0};
+    int found = 0;
+    int valid = 0;
+    int privileges_lowered = 0;
+    int result = PAM_AUTH_ERR;
 
     if (parse_args(pamh, argc, argv, &params) != 0)
     {
@@ -216,40 +268,57 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
 
     if (decrease_privileges(gid, uid, &old_gid, &old_uid) != 0)
     {
-        return PAM_AUTH_ERR;
+        goto cleanup;
     }
+    privileges_lowered = 1;
 
     if (get_secret_path(uid, &params, &secret_path) != 0)
     {
-        restore_privileges(old_gid, old_uid);
-        return PAM_AUTH_ERR;
+        goto cleanup;
     }
-
     if (get_secret_file(secret_path, secret_b32, sizeof(secret_b32), &found) != 0)
     {
-        restore_privileges(old_gid, old_uid);
-        return PAM_AUTH_ERR;
+        goto cleanup;
     }
 
-    restore_privileges(old_gid, old_uid);
-
-    if (!found && params.nullok == NULLERR)
+    if (restore_privileges(old_gid, old_uid) != 0)
     {
-        pam_syslog(pamh, LOG_ERR, "Usuario sin secreto y nullok = NULLERR, denegando acceso");
-        return PAM_AUTH_ERR;
+        goto cleanup;
+    }
+    privileges_lowered = 0;
+
+    if (!found)
+    {
+        if (params.nullok == NULLERR)
+        {
+            pam_syslog(pamh, LOG_ERR, "Usuario sin secreto y nullok = NULLERR, denegando acceso");
+        }
+        else
+        {
+            result = PAM_SUCCESS;
+        }
+        goto cleanup;
     }
 
     if (ask_for_token(pamh, &params, code) != 0)
     {
-        return PAM_AUTH_ERR;
+        goto cleanup;
     }
-
-    if (validate_token(pamh, &params, secret_b32, code, &valid) != 0 || !valid)
+    if (validate_pam_token(pamh, &params, secret_b32, code, &valid) != 0 || !valid)
     {
-        return PAM_AUTH_ERR;
+        goto cleanup;
     }
+    result = PAM_SUCCESS;
 
-    return PAM_SUCCESS;
+cleanup:
+    if (privileges_lowered && restore_privileges(old_gid, old_uid) != 0)
+    {
+        result = PAM_AUTH_ERR;
+    }
+    free(secret_path);
+    explicit_bzero(secret_b32, sizeof(secret_b32));
+    explicit_bzero(code, sizeof(code));
+    return result;
 }
 
 /* Funciones auth de pam */
@@ -261,5 +330,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
 PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
+    (void)pamh;
+    (void)flags;
+    (void)argc;
+    (void)argv;
     return PAM_SUCCESS;
 }
