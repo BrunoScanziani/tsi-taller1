@@ -8,7 +8,7 @@
                        ram y que el compilador no lo optimice,                              \
                        O_NOFOLLOW para fallar si intento abrir un archivo que apunta a otro \
                        archivo/carpeta (util para cuando lea el secreto),                   \
-                       setfsuid/setfsgid  para bajar privilegios de uso de file system*/
+                       seteuid/setegid para bajar privilegios temporalmente */
 
 /* Necesito tipos y funciones que vienen de estos includes */
 #include <stdio.h>
@@ -22,7 +22,6 @@
 #include <pwd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/fsuid.h>
 #include <syslog.h>
 
 /* pam modules para las funciones que hay que implementar, pam_ext para el log y la conversacion */
@@ -40,11 +39,11 @@ static int parse_args(pam_handle_t *pamh, int argc, const char **argv, Params *p
 {
     for (int i = 0; i < argc; ++i)
     {
-        if (strncmp(argv[i], "debug", 5) == 0)
+        if (strcmp(argv[i], "debug") == 0)
         {
             params->debug = 1;
         }
-        else if (strncmp(argv[i], "nullok", 6) == 0)
+        else if (strcmp(argv[i], "nullok") == 0)
         {
             params->nullok = NULLOK;
         }
@@ -71,6 +70,15 @@ static int parse_args(pam_handle_t *pamh, int argc, const char **argv, Params *p
         }
     }
     return 0;
+}
+
+/* Registra mensajes de diagnóstico que no contienen credenciales ni rutas sensibles. */
+static void debug_log(pam_handle_t *pamh, const Params *params, const char *message)
+{
+    if (params->debug)
+    {
+        pam_syslog(pamh, LOG_DEBUG, "%s", message);
+    }
 }
 
 /* Obtiene el uid y gid del usuario que se esta intentando autenticar 0 OK, -1 error. */
@@ -223,9 +231,8 @@ static int ask_for_token(pam_handle_t *pamh, Params *params, char *digits)
 
 /* Valida el codigo ingresado por el usuario. valid = 1 si el TOTP es correcto.
     0 OK (ejecuto, no implica valid = 1), -1 error. */
-static int validate_pam_token(pam_handle_t *pamh, const Params *params, const char *secret_b32, const char *code, int *valid)
+static int validate_pam_token(const Params *params, const char *secret_b32, const char *code, int *valid)
 {
-    (void)pamh;
     return validate_token(secret_b32, code, (unsigned)params->window, valid);
 }
 
@@ -253,6 +260,7 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
     char code[DEFAULT_DIGITS + 1] = {0};
     int found = 0;
     int valid = 0;
+    int validation_rc;
     int privileges_lowered = 0;
     int result = PAM_AUTH_ERR;
 
@@ -260,32 +268,41 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
     {
         return PAM_AUTH_ERR;
     }
+    debug_log(pamh, &params, "Argumentos del módulo procesados");
 
     if (get_uid_gid(pamh, &uid, &gid) != 0)
     {
         return PAM_AUTH_ERR;
     }
+    debug_log(pamh, &params, "Usuario PAM resuelto correctamente");
 
     if (decrease_privileges(gid, uid, &old_gid, &old_uid) != 0)
     {
+        pam_syslog(pamh, LOG_ERR, "No se pudieron reducir los privilegios efectivos");
         goto cleanup;
     }
     privileges_lowered = 1;
+    debug_log(pamh, &params, "Privilegios efectivos reducidos para leer la configuración");
 
     if (get_secret_path(uid, &params, &secret_path) != 0)
     {
+        debug_log(pamh, &params, "No se pudo construir la ruta de configuración");
         goto cleanup;
     }
     if (get_secret_file(secret_path, secret_b32, sizeof(secret_b32), &found) != 0)
     {
+        debug_log(pamh, &params, "No se pudo leer la configuración TOTP");
         goto cleanup;
     }
+    debug_log(pamh, &params, found ? "Configuración TOTP encontrada" : "Configuración TOTP no encontrada");
 
     if (restore_privileges(old_gid, old_uid) != 0)
     {
+        pam_syslog(pamh, LOG_ERR, "No se pudieron restaurar los privilegios efectivos");
         goto cleanup;
     }
     privileges_lowered = 0;
+    debug_log(pamh, &params, "Privilegios efectivos restaurados");
 
     if (!found)
     {
@@ -295,24 +312,39 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
         }
         else
         {
+            debug_log(pamh, &params, "Acceso permitido por nullok");
             result = PAM_SUCCESS;
         }
         goto cleanup;
     }
 
+    debug_log(pamh, &params, "Solicitando código TOTP");
     if (ask_for_token(pamh, &params, code) != 0)
     {
+        debug_log(pamh, &params, "No se recibió un código TOTP válido");
         goto cleanup;
     }
-    if (validate_pam_token(pamh, &params, secret_b32, code, &valid) != 0 || !valid)
+    debug_log(pamh, &params, "Código TOTP recibido");
+
+    validation_rc = validate_pam_token(&params, secret_b32, code, &valid);
+    if (validation_rc != 0)
     {
+        debug_log(pamh, &params, "Error interno durante la validación TOTP");
         goto cleanup;
     }
+    if (!valid)
+    {
+        debug_log(pamh, &params, "Código TOTP rechazado");
+        goto cleanup;
+    }
+
+    debug_log(pamh, &params, "Código TOTP aceptado");
     result = PAM_SUCCESS;
 
 cleanup:
     if (privileges_lowered && restore_privileges(old_gid, old_uid) != 0)
     {
+        pam_syslog(pamh, LOG_ERR, "No se pudieron restaurar los privilegios durante la limpieza");
         result = PAM_AUTH_ERR;
     }
     free(secret_path);
