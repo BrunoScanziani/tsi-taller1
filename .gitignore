@@ -2,3 +2,5 @@
 *.so
 *.enc
 .vscode
+tsi-enroll
+test/test_pam

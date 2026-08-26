@@ -17,6 +17,11 @@ ENROLL      := tsi-enroll
 ENROLL_SRC  := src/enroll.c
 ENROLL_LIBS := -lcotp -lgcrypt
 
+# Suite de tests (integracion contra el .so real via libpam)
+TEST_BIN    := test/test_pam
+TEST_SRC    := test/test_pam.c
+TEST_LIBS   := -lpam -lcotp
+
 # Ruta de instalación de módulos PAM: difiere entre distros.
 # Se puede sobrescribir: make install SECURITYDIR=/otra/ruta
 SECURITYDIR ?= $(shell test -d /usr/lib64/security && echo /usr/lib64/security || echo /usr/lib/x86_64-linux-gnu/security)
@@ -33,6 +38,13 @@ $(MODULE): $(MODULE_SRC) $(LIBSRC)
 $(ENROLL): $(ENROLL_SRC) $(LIBSRC)
 	$(CC) $(CFLAGS) -o $@ $(ENROLL_SRC) $(LIBSRC) $(ENROLL_LIBS)
 
+# Compila el modulo y corre la suite de tests contra el .so recien construido.
+$(TEST_BIN): $(TEST_SRC) $(MODULE)
+	$(CC) $(CFLAGS) -o $@ $(TEST_SRC) $(TEST_LIBS)
+
+test: $(TEST_BIN)
+	./$(TEST_BIN) "$(abspath $(MODULE))"
+
 install: $(ENROLL) $(MODULE)
 	install -m 0755 $(ENROLL) /usr/local/bin/
 	install -d $(SECURITYDIR)
@@ -43,6 +55,6 @@ uninstall:
 	rm -f $(SECURITYDIR)/$(MODULE)
 
 clean:
-	rm -f $(ENROLL) $(MODULE) src/*.o
+	rm -f $(ENROLL) $(MODULE) $(TEST_BIN) src/*.o
 
-.PHONY: all install uninstall clean
+.PHONY: all install uninstall clean test
