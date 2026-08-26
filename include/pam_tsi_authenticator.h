@@ -11,7 +11,7 @@
 
 #define MODULE_NAME "pam_tsi_authenticator"  /* etiqueta para pam_syslog */
 #define SECRET_FILENAME ".tsi_authenticator" /* nombre del archivo en el home */
-#define DEFAULT_DIGITS 6                     /* digitos del código TOTP */
+#define DEFAULT_DIGITS 8                     /* digitos del código TOTP */
 #define DEFAULT_PERIOD 30                    /* timestep en segundos */
 #define DEFAULT_WINDOW 3                     /* cantidad de codigos validos */
 #define SECRET_B32_MAX 64                    /* buffer del secreto en Base32 */

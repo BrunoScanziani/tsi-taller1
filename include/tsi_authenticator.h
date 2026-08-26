@@ -16,7 +16,7 @@
 
 #define SECRET_FILENAME ".tsi_authenticator" /* nombre del archivo en el home */
 #define SECRET_BITS_NUMBER 160               /* Cantidad de bits del secreto */
-#define DEFAULT_DIGITS 6                     /* digitos del código TOTP */
+#define DEFAULT_DIGITS 8                     /* digitos del código TOTP */
 #define DEFAULT_PERIOD 30                    /* timestep en segundos */
 #define DEFAULT_WINDOW 3                     /* cantidad de codigos validos */
 #define SECRET_B32_MAX 64                    /* buffer del secreto en Base32 */

@@ -69,7 +69,7 @@ int main() {
     }
 
     /*  Mostrar el qr y el secreto para que lo vincule */
-    printf("\nEscaneá este QR con tu app autenticadora (Aegis/FreeOTP, 6 digitos):\n\n");
+    printf("\nEscaneá este QR con tu app autenticadora (Aegis/FreeOTP, 8 digitos):\n\n");
     if (generate_qr(uri) != 0) {
         fprintf(stderr, "Aviso: no se pudo generar el QR\n");
     }
