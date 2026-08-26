@@ -50,8 +50,8 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    /* Guardar el secreto y la config con window y rate limit en su valor default */
-    if (save_secret(path, secret_b32, DEFAULT_WINDOW, RATE_LIMIT) != 0) {
+    /* Guardar el secreto y la config con window, rate limit y lock time en su valor default */
+    if (save_secret(path, secret_b32, DEFAULT_WINDOW, RATE_LIMIT, TIEMPO_RATE_LIMIT) != 0) {
         fprintf(stderr, "Error: no se pudo guardar el secreto\n");
 
         /* Sobreescribo la memoria del secreto antes de salir */

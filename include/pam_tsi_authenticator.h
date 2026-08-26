@@ -15,6 +15,8 @@
 #define DEFAULT_PERIOD 30                    /* timestep en segundos */
 #define DEFAULT_WINDOW 3                     /* cantidad de codigos validos */
 #define SECRET_B32_MAX 64                    /* buffer del secreto en Base32 */
+#define USED_LINE_SIZE (SECRET_B32_MAX + 32)  /* holgado para "CLAVE=timestamp:codigo\n" */
+#define MAX_CONFIG_LINES 16                    /* lineas de config (SECRET/WINDOW/...) a conservar */
 
 /* Struct con los parametros que obtendremos */
 typedef struct Params
@@ -30,5 +32,17 @@ typedef struct Params
     size_t window;               /* tamanio de la ventana de tolerancia */
     const char *secret_filename; /* override por 'secret=', o NULL */
 } Params;
+
+/* Config y estado que viven en el archivo ~/.tsi_authenticator.
+   window/rate_limit/lock_time los fija el admin (con defaults);
+   fail_count/locked_until los gestiona el modulo (rate-limit). */
+typedef struct AuthState
+{
+    unsigned window;       /* codigos validos simultaneos (tolerancia de reloj) */
+    unsigned rate_limit;   /* fallos consecutivos permitidos antes de bloquear */
+    unsigned lock_time;    /* segundos de bloqueo al alcanzar rate_limit */
+    unsigned fail_count;   /* estado: fallos consecutivos acumulados */
+    long     locked_until; /* estado: epoch hasta el que el acceso esta bloqueado (0 = libre) */
+} AuthState;
 
 #endif /* PAM_TSI_AUTHENTICATOR_H */

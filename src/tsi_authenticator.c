@@ -232,7 +232,7 @@ int build_secret_path(char *path_out, size_t path_size)
 }
 
 /* Funcion que guarda el secreto en el home del usuario, crea el archivo */
-int save_secret(const char *path, const char *secret_b32, unsigned window, unsigned rate_limit)
+int save_secret(const char *path, const char *secret_b32, unsigned window, unsigned rate_limit, unsigned lock_time)
 {
     /* Creo el archivo en el home. Los parametron son para:
         O_WEONLY: abrir en modo escritura solamente
@@ -264,10 +264,11 @@ int save_secret(const char *path, const char *secret_b32, unsigned window, unsig
     }
 
     /* Escribo los valores en el archivo */
-    int n = fprintf(f, "%s=%s\n%s=%u\n%s=%u\n",
+    int n = fprintf(f, "%s=%s\n%s=%u\n%s=%u\n%s=%u\n",
                     SECRET_KEY, secret_b32,
                     WINDOW_KEY, window,
-                    RATE_LIMIT_KEY, rate_limit);
+                    RATE_LIMIT_KEY, rate_limit,
+                    LOCK_TIME_KEY, lock_time);
 
     /* Chequeo si se escrbio bien */
     if (n < 0)

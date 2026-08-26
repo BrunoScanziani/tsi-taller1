@@ -13,6 +13,12 @@
 #define SECRET_KEY "SECRET"
 #define WINDOW_KEY "WINDOW"
 #define RATE_LIMIT_KEY "RATE_LIMIT"
+#define LOCK_TIME_KEY "LOCK_TIME"            /* override opcional de TIEMPO_RATE_LIMIT */
+#define USED_CODE_KEY "USED_CODE"
+#define FAIL_COUNT_KEY "FAIL_COUNT"          /* estado: fallos consecutivos */
+#define LOCKED_UNTIL_KEY "LOCKED_UNTIL"      /* estado: epoch hasta el que esta bloqueado */
+#define MAX_USED_ENTRIES 50
+#define CODE_MAX_AGE 150                     /* 3 minutos en segundos */
 
 #define SECRET_FILENAME ".tsi_authenticator" /* nombre del archivo en el home */
 #define SECRET_BITS_NUMBER 160               /* Cantidad de bits del secreto */
@@ -20,7 +26,8 @@
 #define DEFAULT_PERIOD 30                    /* timestep en segundos */
 #define DEFAULT_WINDOW 3                     /* cantidad de codigos validos */
 #define SECRET_B32_MAX 64                    /* buffer del secreto en Base32 */
-#define RATE_LIMIT 3                         /* cantidad de intentos incorrectos antes de abortar */
+#define RATE_LIMIT 3                         /* fallos consecutivos permitidos antes de bloquear */
+#define TIEMPO_RATE_LIMIT 300                /* segundos de bloqueo tras alcanzar RATE_LIMIT */
 
 /* Funcion encargada de validar un código TOTP */
 int validate_token(const char *secret_b32, const char *code, unsigned window, int *valid);
@@ -43,7 +50,7 @@ int get_current_username(char *user_out, size_t user_size);
 int build_secret_path(char *path_out, size_t path_size);
 
 /* Funcion que guarda el secreto en el home del usuario, crea el archivo */
-int save_secret(const char *path, const char *secret_b32, unsigned window, unsigned rate_limit);
+int save_secret(const char *path, const char *secret_b32, unsigned window, unsigned rate_limit, unsigned lock_time);
 
 /* Funcion que borra el archivo de path, en este caso sera el secreto*/
 int delete_secret(const char *path);
