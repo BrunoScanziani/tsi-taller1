@@ -198,7 +198,7 @@ static int restore_privileges(gid_t old_gid, uid_t old_uid)
 }
 
 /* Reescribe (o crea) el archivo root-only de config+estado del usuario:
-   - conserva verbatim las lineas de config (WINDOW, RATE_LIMIT, LOCK_TIME, etc.),
+   - conserva las lineas de config (WINDOW, RATE_LIMIT, LOCK_TIME, etc.),
    - reescribe FAIL_COUNT y LOCKED_UNTIL con los valores de 'state',
    - conserva solo las entradas USED_CODE vigentes (dentro de CODE_MAX_AGE), acotadas a
      MAX_USED_ENTRIES (descarta las mas viejas),
@@ -392,7 +392,7 @@ cleanup:
 }
 
 
-/* Lee el SECRET del archivo del home del usuario (solo esa clave).
+/* Lee el SECRET del archivo del home del usuario
    found = 1 si el archivo existía y tenía el SECRET, 0 si no existe.
    0 OK (incluso si no existe), -1 error. */
 static int read_home_secret(const char *path, char *secret_out, size_t out_size, int *found)

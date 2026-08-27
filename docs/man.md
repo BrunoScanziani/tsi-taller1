@@ -87,7 +87,7 @@ Config (la edita el admin; si falta una clave, se usa el default):
 Estado gestionado por el módulo (**no editar**):
 
 - `FAIL_COUNT` — fallos consecutivos acumulados.
-- `LOCKED_UNTIL` — epoch hasta el que el acceso está bloqueado (0 = libre).
+- `LOCKED_UNTIL` — tiempo hasta el que el acceso está bloqueado (0 = libre).
 - `USED_CODE` — códigos usados recientemente (No-Replay).
 
 Otras rutas:
