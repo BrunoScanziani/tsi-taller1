@@ -11,7 +11,7 @@ Código y documentación correspondiente al taller 1 del curso TSI
 
 ---
 
-## 2. Ubuntu (24.04 LTS)
+## 2. Ubuntu (26.04 LTS)
 
 ```bash
 sudo apt update
