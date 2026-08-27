@@ -62,7 +62,7 @@ make
 sudo make install
 ```
 
-`make install` detecta la ruta de módulos PAM según la distro.
+`make install` detecta la ruta de módulos PAM según la distro y crea el directorio root-only `/var/lib/tsi_authenticator/` (`0700`), donde el módulo guarda la config y el estado de cada usuario.
 
 ---
 
@@ -94,17 +94,20 @@ Cada usuario lo ejecuta para sí mismo:
 > **8 dígitos.** Google Authenticator no los soporta. Usar **Aegis** o **FreeOTP** (Android), **Raivo** / **2FAS** (iOS). Prueba sin teléfono:
 > `oathtool --totp -b --digits=8 <SECRETO_BASE32>`.
 
-Verificar:
+Verificar (el home solo tiene el secreto):
 
 ```bash
-ls -l ~/.tsi_authenticator     # -rw------- (0600)
-cat ~/.tsi_authenticator
+ls -l ~/.tsi_authenticator     # -rw------- (0600), dueño = usuario
+cat ~/.tsi_authenticator       # SECRET=<Base32>
 ```
 
-Formato del archivo:
+La **config y el estado** viven aparte, en un archivo **root-only** que crea el módulo en el primer login:
+
+```bash
+sudo cat /var/lib/tsi_authenticator/$(id -u)_tsi_config
+```
 
 ```
-SECRET=<Base32>
 WINDOW=3                          # config (admin)
 RATE_LIMIT=3                      # config (admin): fallos antes de bloquear
 LOCK_TIME=300                     # config (admin): segundos de bloqueo
@@ -113,7 +116,7 @@ LOCKED_UNTIL=0                    # estado (módulo): epoch de fin de bloqueo, 0
 USED_CODE=<timestamp>:<codigo>    # estado (módulo): No-Replay
 ```
 
-`WINDOW`, `RATE_LIMIT` y `LOCK_TIME` los puede ajustar el admin. `FAIL_COUNT`, `LOCKED_UNTIL` y `USED_CODE` los gestiona el módulo automáticamente; no editarlos (salvo poner `LOCKED_UNTIL=0` para desbloquear a un usuario).
+`WINDOW`, `RATE_LIMIT` y `LOCK_TIME` los ajusta el admin (como root). El resto lo gestiona el módulo; no editarlo (salvo `LOCKED_UNTIL=0` para desbloquear a un usuario). El usuario no tiene acceso a este archivo.
 
 ---
 
@@ -218,7 +221,7 @@ pamtester tsi-test $USER authenticate
 | No aparece el prompt del código | `KbdInteractiveAuthentication no` | Corregir `sshd_config` |
 | Entra sin pedir código | Login por clave pública | Autenticarse con contraseña |
 | Código válido rechazado al reintentar | No-Replay (código ya usado) | Esperar el siguiente código |
-| "Demasiados intentos fallidos" | Rate-limit activo | Esperar `LOCK_TIME`, o `LOCKED_UNTIL=0` en el archivo |
+| "Demasiados intentos fallidos" | Rate-limit activo | Esperar `LOCK_TIME`, o `LOCKED_UNTIL=0` en `/var/lib/tsi_authenticator/<uid>_tsi_config` (root) |
 | El QR no aparece | Falta `qrencode` | Instalar `qrencode` |
 
 ---
@@ -229,4 +232,4 @@ pamtester tsi-test $USER authenticate
 sudo make uninstall
 ```
 
-No borra los `~/.tsi_authenticator` de cada usuario; eliminarlos por separado si se desea.
+No borra los datos por usuario: los secretos en `~/.tsi_authenticator` ni la config/estado en `/var/lib/tsi_authenticator/`; eliminarlos por separado si se desea.

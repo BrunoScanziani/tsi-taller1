@@ -22,7 +22,8 @@
 #include <security/pam_appl.h>
 #include <cotp.h>
 
-#include "tsi_authenticator.h"   /* SECRET_KEY, DEFAULT_DIGITS, DEFAULT_PERIOD, ... */
+#include "tsi_authenticator.h"       /* SECRET_KEY, WINDOW_KEY, DEFAULT_DIGITS, ... */
+#include "pam_tsi_authenticator.h"   /* STATE_FILE_SUFFIX */
 
 #define GREEN "\033[32m"
 #define RED   "\033[31m"
@@ -104,14 +105,22 @@ static int try_auth(const char *confdir, const char *service,
 
 /* ----- Helpers de fixtures ----- */
 
-/* Escribe el archivo de configuracion/secreto con los valores dados. */
-static void write_secret_file(const char *path, const char *secret,
-                              unsigned window, unsigned rate_limit, unsigned lock_time)
+/* Escribe el archivo del home con SOLO el secreto (como hace tsi-enroll). */
+static void write_home_secret(const char *path, const char *secret)
 {
     FILE *f = fopen(path, "w");
     if (!f) { perror("fopen secret"); exit(2); }
-    fprintf(f, "%s=%s\n%s=%u\n%s=%u\n%s=%u\n",
-            SECRET_KEY, secret,
+    fprintf(f, "%s=%s\n", SECRET_KEY, secret);
+    fclose(f);
+    chmod(path, 0600);
+}
+
+/* Escribe el archivo root-only de config+estado (para fijar RATE_LIMIT/LOCK_TIME del test). */
+static void write_state_file(const char *path, unsigned window, unsigned rate_limit, unsigned lock_time)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) { perror("fopen state"); exit(2); }
+    fprintf(f, "%s=%u\n%s=%u\n%s=%u\n",
             WINDOW_KEY, window,
             RATE_LIMIT_KEY, rate_limit,
             LOCK_TIME_KEY, lock_time);
@@ -119,16 +128,16 @@ static void write_secret_file(const char *path, const char *secret,
     chmod(path, 0600);
 }
 
-/* Escribe un archivo de servicio PAM en confdir apuntando al .so por ruta absoluta. */
+/* Escribe un archivo de servicio PAM en confdir: apunta al .so, al secreto y al statedir. */
 static void write_service(const char *confdir, const char *service, const char *so_abs,
-                          const char *secret_path, int nullok)
+                          const char *secret_path, const char *state_dir, int nullok)
 {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", confdir, service);
     FILE *f = fopen(path, "w");
     if (!f) { perror("fopen service"); exit(2); }
-    fprintf(f, "auth required %s secret=%s%s\n",
-            so_abs, secret_path, nullok ? " nullok" : "");
+    fprintf(f, "auth required %s secret=%s statedir=%s%s\n",
+            so_abs, secret_path, state_dir, nullok ? " nullok" : "");
     fclose(f);
 }
 
@@ -189,14 +198,20 @@ int main(int argc, char **argv)
     snprintf(secret_rl,   sizeof(secret_rl),   "%s/.sec_rl", workdir);
     snprintf(secret_none, sizeof(secret_none), "%s/.sec_none", workdir);   /* no existe */
 
+    /* El modulo guarda el estado en <statedir>/<uid>_tsi_config. Uso el workdir como statedir;
+       lo borro entre escenarios para aislarlos (todos comparten el mismo uid). */
+    char state_path[PATH_MAX];
+    snprintf(state_path, sizeof(state_path), "%s/%u%s", workdir, (unsigned)getuid(), STATE_FILE_SUFFIX);
+
     printf(DIM "modulo:  %s\n" RESET, so_abs);
     printf(DIM "usuario: %s\n" RESET, user);
     printf(DIM "workdir: %s\n\n" RESET, workdir);
 
     /* ============ 1) Codigo correcto ============ */
     printf("== Casos correctos ==\n");
-    write_secret_file(secret_ok, TEST_SECRET, DEFAULT_WINDOW, 3, 300);
-    write_service(workdir, "ok", module_link,secret_ok, 0);
+    unlink(state_path);   /* estado limpio */
+    write_home_secret(secret_ok, TEST_SECRET);
+    write_service(workdir, "ok", module_link, secret_ok, workdir, 0);
     {
         char *code = current_code(TEST_SECRET);
         int rc = try_auth(workdir, "ok", user, code);
@@ -206,7 +221,7 @@ int main(int argc, char **argv)
 
     /* ============ 2) Codigo incorrecto ============ */
     printf("\n== Casos incorrectos ==\n");
-    write_secret_file(secret_ok, TEST_SECRET, DEFAULT_WINDOW, 3, 300);   /* reset limpio */
+    unlink(state_path);   /* estado limpio */
     {
         char *code = wrong_code(TEST_SECRET);
         int rc = try_auth(workdir, "ok", user, code);
@@ -221,7 +236,7 @@ int main(int argc, char **argv)
 
     /* ============ 3) Replay ============ */
     printf("\n== No-Replay ==\n");
-    write_secret_file(secret_ok, TEST_SECRET, DEFAULT_WINDOW, 3, 300);
+    unlink(state_path);   /* estado limpio */
     {
         char *code = current_code(TEST_SECRET);
         int rc1 = try_auth(workdir, "ok", user, code);
@@ -233,8 +248,10 @@ int main(int argc, char **argv)
 
     /* ============ 4) Rate limit ============ */
     printf("\n== Rate limit (RATE_LIMIT=3, LOCK_TIME=2s) ==\n");
-    write_secret_file(secret_rl, TEST_SECRET, DEFAULT_WINDOW, 3, 2);
-    write_service(workdir, "rl", module_link,secret_rl, 0);
+    write_home_secret(secret_rl, TEST_SECRET);
+    write_service(workdir, "rl", module_link, secret_rl, workdir, 0);
+    unlink(state_path);
+    write_state_file(state_path, DEFAULT_WINDOW, 3, 2);   /* LOCK_TIME=2 para test rapido */
     {
         char *wc = wrong_code(TEST_SECRET);
         int rc1 = try_auth(workdir, "rl", user, wc);
@@ -262,8 +279,9 @@ int main(int argc, char **argv)
 
     /* ============ 5) Sin secreto (nullok) ============ */
     printf("\n== Usuario sin secreto ==\n");
-    write_service(workdir, "nonull", module_link,secret_none, 0);
-    write_service(workdir, "nullok", module_link,secret_none, 1);
+    unlink(state_path);
+    write_service(workdir, "nonull", module_link, secret_none, workdir, 0);
+    write_service(workdir, "nullok", module_link, secret_none, workdir, 1);
     {
         int rc_deny = try_auth(workdir, "nonull", user, "00000000");
         check_rc("sin secreto y sin nullok => AUTH_ERR", rc_deny, PAM_AUTH_ERR);
@@ -274,6 +292,7 @@ int main(int argc, char **argv)
     /* ----- Limpieza ----- */
     unlink(module_link);
     unlink(secret_ok); unlink(secret_rl);
+    unlink(state_path);
     { char p[PATH_MAX];
       const char *svc[] = { "ok", "rl", "nonull", "nullok" };
       for (size_t i = 0; i < sizeof(svc)/sizeof(*svc); i++) {

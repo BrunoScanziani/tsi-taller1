@@ -10,7 +10,9 @@
 #include <stddef.h> /* size_t */
 
 #define MODULE_NAME "pam_tsi_authenticator"  /* etiqueta para pam_syslog */
-#define SECRET_FILENAME ".tsi_authenticator" /* nombre del archivo en el home */
+#define SECRET_FILENAME ".tsi_authenticator" /* archivo del secreto en el home (dueño: usuario) */
+#define TSI_STATE_DIR "/var/lib/tsi_authenticator" /* dir root-only de config+estado por usuario */
+#define STATE_FILE_SUFFIX "_tsi_config"      /* archivo por usuario: <uid>_tsi_config */
 #define DEFAULT_DIGITS 8                     /* digitos del código TOTP */
 #define DEFAULT_PERIOD 30                    /* timestep en segundos */
 #define DEFAULT_WINDOW 3                     /* cantidad de codigos validos */
@@ -30,12 +32,14 @@ typedef struct Params
     unsigned digits;             /* cantidad de digitos del codigo */
     unsigned period;             /* timestep en segundos */
     size_t window;               /* tamanio de la ventana de tolerancia */
-    const char *secret_filename; /* override por 'secret=', o NULL */
+    const char *secret_filename; /* override por 'secret=' del archivo del home, o NULL */
+    const char *state_dir;       /* override por 'statedir=' del dir root-only, o NULL */
 } Params;
 
-/* Config y estado que viven en el archivo ~/.tsi_authenticator.
+/* Config y estado que viven en el archivo root-only <TSI_STATE_DIR>/<uid>_tsi_config.
    window/rate_limit/lock_time los fija el admin (con defaults);
-   fail_count/locked_until los gestiona el modulo (rate-limit). */
+   fail_count/locked_until los gestiona el modulo (rate-limit).
+   El SECRET vive aparte, en el home del usuario. */
 typedef struct AuthState
 {
     unsigned window;       /* codigos validos simultaneos (tolerancia de reloj) */

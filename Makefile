@@ -45,10 +45,14 @@ $(TEST_BIN): $(TEST_SRC) $(MODULE)
 test: $(TEST_BIN)
 	./$(TEST_BIN) "$(abspath $(MODULE))"
 
+# Directorio root-only donde el modulo guarda config+estado por usuario (<uid>_tsi_config)
+STATEDIR ?= /var/lib/tsi_authenticator
+
 install: $(ENROLL) $(MODULE)
 	install -m 0755 $(ENROLL) /usr/local/bin/
 	install -d $(SECURITYDIR)
 	install -m 0644 $(MODULE) $(SECURITYDIR)/$(MODULE)
+	install -d -m 0700 $(STATEDIR)
 
 uninstall:
 	rm -f /usr/local/bin/$(ENROLL)

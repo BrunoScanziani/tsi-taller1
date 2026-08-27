@@ -50,8 +50,8 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    /* Guardar el secreto y la config con window, rate limit y lock time en su valor default */
-    if (save_secret(path, secret_b32, DEFAULT_WINDOW, RATE_LIMIT, TIEMPO_RATE_LIMIT) != 0) {
+    /* Guardar solo el secreto en el home; la config/estado la crea el modulo (root-only) */
+    if (save_secret(path, secret_b32) != 0) {
         fprintf(stderr, "Error: no se pudo guardar el secreto\n");
 
         /* Sobreescribo la memoria del secreto antes de salir */

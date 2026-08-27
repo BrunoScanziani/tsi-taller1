@@ -49,8 +49,10 @@ int get_current_username(char *user_out, size_t user_size);
 /* Construye <home>/SECRET_FILENAME para guardar el secreto. 0 OK, -1 error. */
 int build_secret_path(char *path_out, size_t path_size);
 
-/* Funcion que guarda el secreto en el home del usuario, crea el archivo */
-int save_secret(const char *path, const char *secret_b32, unsigned window, unsigned rate_limit, unsigned lock_time);
+/* Funcion que guarda el secreto en el home del usuario, crea el archivo.
+   Solo escribe el SECRET; la config y el estado del rate-limit los gestiona el modulo
+   en el archivo root-only. */
+int save_secret(const char *path, const char *secret_b32);
 
 /* Funcion que borra el archivo de path, en este caso sera el secreto*/
 int delete_secret(const char *path);

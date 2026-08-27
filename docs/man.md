@@ -29,15 +29,16 @@ tsi-enroll
 Provee un segundo factor TOTP para servicios PAM (típicamente SSH). Implementa el grupo `auth`. En cada autenticación:
 
 1. Resuelve el usuario.
-2. Reduce privilegios efectivos a los del usuario.
-3. Lee el secreto y el estado (`~/.tsi_authenticator`).
-4. Restaura privilegios.
-5. **Rate-limit:** si el usuario está bloqueado (`LOCKED_UNTIL` en el futuro), deniega sin pedir el código.
-6. Solicita el código TOTP (sin eco).
-7. Calcula los códigos válidos dentro de la ventana de tolerancia y compara.
-8. **No-Replay:** un código correcto pero ya usado se trata como intento fallido.
-9. **Éxito:** resetea el contador de fallos, registra el código usado y devuelve `PAM_SUCCESS`.
-10. **Fallo:** incrementa `FAIL_COUNT`; al alcanzar `RATE_LIMIT` fija un bloqueo de `LOCK_TIME` segundos y devuelve `PAM_AUTH_ERR`.
+2. Baja privilegios al usuario y lee el `SECRET` de su home (`~/.tsi_authenticator`); restaura privilegios.
+3. Como root, lee la config y el estado del archivo root-only (`/var/lib/tsi_authenticator/<uid>_tsi_config`).
+4. **Rate-limit:** si el usuario está bloqueado (`LOCKED_UNTIL` en el futuro), deniega sin pedir el código.
+5. Solicita el código TOTP (sin eco).
+6. Calcula los códigos válidos dentro de la ventana de tolerancia y compara.
+7. **No-Replay:** un código correcto pero ya usado se trata como intento fallido.
+8. **Éxito:** resetea el contador de fallos, registra el código usado y devuelve `PAM_SUCCESS`.
+9. **Fallo:** incrementa `FAIL_COUNT`; al alcanzar `RATE_LIMIT` fija un bloqueo de `LOCK_TIME` segundos y devuelve `PAM_AUTH_ERR`.
+
+El archivo root-only lo crea el módulo (que corre como root) en el primer login, con los valores por defecto; el admin puede editarlo luego.
 
 ### Parámetros del esquema (fijos)
 
@@ -58,10 +59,17 @@ Provee un segundo factor TOTP para servicios PAM (típicamente SSH). Implementa 
 
 ## FILES
 
-**`~/.tsi_authenticator`** — secreto y configuración por usuario. Permisos `0600`, propiedad del usuario. Formato clave-valor:
+**`~/.tsi_authenticator`** — solo el secreto. Permisos `0600`, propiedad del **usuario** (lo crea `tsi-enroll`):
 
 ```
 SECRET=<Base32>
+```
+
+- `SECRET` — secreto TOTP en Base32. **No divulgar.**
+
+**`/var/lib/tsi_authenticator/<uid>_tsi_config`** — config y estado por usuario. Permisos `0600`, propiedad de **root** (el usuario no puede leerlo ni editarlo). Lo crea el módulo en el primer login:
+
+```
 WINDOW=3
 RATE_LIMIT=3
 LOCK_TIME=300
@@ -70,9 +78,8 @@ LOCKED_UNTIL=0
 USED_CODE=<timestamp>:<codigo>
 ```
 
-Config (fijada por el admin; si falta, se usa el default):
+Config (la edita el admin; si falta una clave, se usa el default):
 
-- `SECRET` — secreto TOTP en Base32. **No divulgar.**
 - `WINDOW` — códigos válidos simultáneos (tolerancia de reloj). Default 3.
 - `RATE_LIMIT` — fallos consecutivos permitidos antes de bloquear. Default 3.
 - `LOCK_TIME` — segundos de bloqueo tras alcanzar `RATE_LIMIT`. Default 300.
@@ -100,20 +107,21 @@ El usuario ejecuta `tsi-enroll` (sin `sudo`), escanea el QR con una app de 8 dí
 ### Deshabilitar 2FA para un usuario
 
 ```bash
-rm ~/.tsi_authenticator
+rm ~<usuario>/.tsi_authenticator                       # secreto (o el propio usuario borra el suyo)
+sudo rm /var/lib/tsi_authenticator/<uid>_tsi_config    # config y estado (root)
 ```
 
 Sin `nullok`, el usuario queda sin acceso hasta re-enrolarse; con `nullok`, accede solo con el primer factor.
 
 ### Ajustar la política de un usuario enrolado
 
-Editar en `~/.tsi_authenticator` (no requiere re-enrolar):
+Editar (como root) `/var/lib/tsi_authenticator/<uid>_tsi_config` (no requiere re-enrolar):
 
 - `WINDOW` — tolerancia de reloj.
 - `RATE_LIMIT` — fallos consecutivos antes de bloquear.
 - `LOCK_TIME` — duración del bloqueo en segundos.
 
-Para desbloquear a un usuario bloqueado de inmediato, poner `LOCKED_UNTIL=0` (o borrar la línea).
+Para desbloquear a un usuario de inmediato, poner `LOCKED_UNTIL=0` en ese archivo (o borrarlo).
 
 ### Parámetros fijos
 
@@ -176,12 +184,13 @@ sudo systemctl restart sshd     # en Ubuntu puede ser 'ssh'
 
 ## SECURITY CONSIDERATIONS
 
-- **No-Replay.** Un código válido no puede reutilizarse mientras siga vigente: el módulo guarda los códigos usados en `~/.tsi_authenticator` y rechaza cualquier repetición. Las entradas vencidas se purgan automáticamente y el archivo se reescribe de forma atómica (temporal + `rename`).
-- **Rate-limit.** Tras `RATE_LIMIT` fallos consecutivos el acceso se bloquea `LOCK_TIME` segundos; durante el bloqueo se deniega sin pedir el código. El estado (`FAIL_COUNT`, `LOCKED_UNTIL`) se guarda en `~/.tsi_authenticator`, que es del usuario: mitiga fuerza bruta **remota** (el atacante SSH no tiene acceso local al archivo), pero un usuario con shell local podría resetear su propio contador. Un replay cuenta como intento fallido.
-- **Protección del secreto.** Se almacena en claro con permisos `0600`; solo el usuario propietario y root pueden leerlo.
-- **Reducción de privilegios.** El módulo opera con la identidad del usuario al acceder a su archivo, no como root.
+- **Estado a prueba de manipulación.** La config y el estado (`FAIL_COUNT`, `LOCKED_UNTIL`, `USED_CODE`) viven en `/var/lib/tsi_authenticator/<uid>_tsi_config`, propiedad de root (`0600`) en un directorio `0700` de root. El usuario **no puede** leerlo ni editarlo: no puede resetear su contador de fallos, levantar su bloqueo ni borrar el historial de replay. Así el rate-limit y el No-Replay son robustos incluso frente a un usuario con shell local.
+- **No-Replay.** Un código válido no puede reutilizarse mientras siga vigente: el módulo guarda los códigos usados (root-only) y rechaza cualquier repetición. Las entradas vencidas se purgan automáticamente y el archivo se reescribe de forma atómica (temporal + `rename`). Un replay cuenta como intento fallido.
+- **Rate-limit.** Tras `RATE_LIMIT` fallos consecutivos el acceso se bloquea `LOCK_TIME` segundos; durante el bloqueo se deniega sin pedir el código.
+- **Protección del secreto.** El `SECRET` vive en el home del usuario (`0600`); lo pueden leer el usuario propietario y root. La app ya lo posee, así que el usuario conocerlo no agrega riesgo; el punto sensible (estado/config) quedó fuera de su alcance.
+- **Reducción de privilegios.** Para leer el secreto del home el módulo baja a la identidad del usuario; el archivo root-only lo maneja como root. Nunca opera como root sobre rutas que el usuario controla.
 - **Higiene de memoria.** Secretos y códigos se sobrescriben con `explicit_bzero`.
-- **Manejo de symlinks.** Los archivos se abren con `O_NOFOLLOW`; un `~/.tsi_authenticator` que sea symlink se rechaza.
+- **Manejo de symlinks.** Ambos archivos se abren con `O_NOFOLLOW`; si alguno es un symlink se rechaza (falla seguro).
 - **Resistencia a fuerza bruta.** 8 dígitos (10^8) y ventana 3 ⇒ probabilidad 3/10^8 por intento. Depende además de los controles del servidor.
 - **Comparación no constante en tiempo.** Usa `strcmp`; riesgo bajo por la rotación de 30 s, documentado como limitación.
 - **Vías que omiten el 2FA.** La clave pública omite el stack `auth`. Para exigir el segundo factor, forzar contraseña o usar `AuthenticationMethods`.

@@ -35,7 +35,10 @@ Compila el módulo y la suite, y la ejecuta. Sale con código ≠ 0 si algún te
 
 ## Detalle
 
-`test_pam.c` crea un directorio temporal en `/tmp`, escribe ahí los archivos de
-secreto y de servicio PAM, y referencia el módulo mediante un symlink sin espacios
-(el parser de config de PAM separa por espacios). Cada `pam_authenticate` simula un
-login independiente, ejercitando la persistencia de estado entre invocaciones.
+`test_pam.c` crea un directorio temporal en `/tmp` y escribe ahí: el archivo de
+secreto del "home" (solo `SECRET`), el archivo de servicio PAM y —vía el override
+`statedir=`— el archivo root-only de config+estado (`<uid>_tsi_config`), evitando
+`/var/lib` y así corriendo sin root. El módulo se referencia con un symlink sin
+espacios (el parser de config de PAM separa por espacios). Cada `pam_authenticate`
+simula un login independiente, ejercitando la persistencia de estado entre
+invocaciones; el estado se limpia entre escenarios para aislarlos.
