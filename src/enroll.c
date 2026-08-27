@@ -10,12 +10,37 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <gcrypt.h>
 #include "tsi_authenticator.h"
 
 #define ISSUER      "TSI"
 #define URI_MAX     256
 #define GCRYPT_MIN_VERSION "1.8.0"
+#define HELPER_PATH "/usr/local/bin/tsi-config-init"
+
+/* Ejecuta el helper setuid que crea el archivo de config root-only del usuario.
+   0 si el helper salio con exito, -1 en cualquier otro caso. */
+static int create_user_config(void)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        /* Hijo: ejecuta el helper. Sin argumentos: toma el uid del proceso. */
+        execl(HELPER_PATH, "tsi-config-init", (char *)NULL);
+        _exit(127);   /* solo se llega si execl fallo */
+    }
+
+    int status;
+    if (waitpid(pid, &status, 0) < 0) {
+        return -1;
+    }
+    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
 
 /* Funcion main que ejecuta el hilo principal */
 int main() {
@@ -131,6 +156,15 @@ int main() {
         return EXIT_SUCCESS;
     }
 
+    /* Vinculo confirmado: creo el archivo de config root-only via el helper setuid.
+       Si falla, borro el secreto para no dejar un enrolamiento a medias. */
+    if (create_user_config() != 0) {
+        fprintf(stderr, "Error: no se pudo crear la configuración del sistema para el 2FA\n");
+        explicit_bzero(secret_b32, sizeof(secret_b32));
+        explicit_bzero(uri, sizeof(uri));
+        delete_secret(path);
+        return EXIT_FAILURE;
+    }
 
     /* Sobreescribir memoria sensible */
     explicit_bzero(secret_b32, sizeof(secret_b32));

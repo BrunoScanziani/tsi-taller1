@@ -27,6 +27,7 @@ Compila el módulo y la suite, y la ejecuta. Sale con código ≠ 0 si algún te
 | Código mal formado (largo/dígitos) | `PAM_AUTH_ERR` |
 | Replay: 1er uso del código | `PAM_SUCCESS` |
 | Replay: 2do uso del mismo código | `PAM_AUTH_ERR` |
+| Con secreto pero sin config (fail closed) | `PAM_AUTH_ERR` |
 | 3 fallos con `RATE_LIMIT=3` | `PAM_AUTH_ERR` (activa bloqueo) |
 | Bloqueado: código correcto | `PAM_AUTH_ERR` |
 | Tras expirar `LOCK_TIME`: código correcto | `PAM_SUCCESS` |
@@ -38,7 +39,10 @@ Compila el módulo y la suite, y la ejecuta. Sale con código ≠ 0 si algún te
 `test_pam.c` crea un directorio temporal en `/tmp` y escribe ahí: el archivo de
 secreto del "home" (solo `SECRET`), el archivo de servicio PAM y —vía el override
 `statedir=`— el archivo root-only de config+estado (`<uid>_tsi_config`), evitando
-`/var/lib` y así corriendo sin root. El módulo se referencia con un symlink sin
-espacios (el parser de config de PAM separa por espacios). Cada `pam_authenticate`
-simula un login independiente, ejercitando la persistencia de estado entre
-invocaciones; el estado se limpia entre escenarios para aislarlos.
+`/var/lib` y así corriendo sin root. El módulo ya no crea ese archivo (lo crea
+`tsi-enroll` con el helper setuid `tsi-config-init`), por eso la suite lo pre-crea en
+cada escenario; el helper, que escribe en `/var/lib` y necesita root, queda fuera de
+esta suite. El módulo se referencia con un symlink sin espacios (el parser de config
+de PAM separa por espacios). Cada `pam_authenticate` simula un login independiente,
+ejercitando la persistencia de estado entre invocaciones; el estado se limpia entre
+escenarios para aislarlos.

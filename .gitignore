@@ -3,4 +3,5 @@
 *.enc
 .vscode
 tsi-enroll
+tsi-config-init
 test/test_pam

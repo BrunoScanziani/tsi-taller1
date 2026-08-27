@@ -7,7 +7,8 @@
 #ifndef TSI_AUTHENTICATOR_H
 #define TSI_AUTHENTICATOR_H
 
-#include <stddef.h> /* size_t */
+#include <stddef.h>      /* size_t */
+#include <sys/types.h>   /* uid_t */
 
 /* Claves del archivo de configuración para guardar los valores importantes */
 #define SECRET_KEY "SECRET"
@@ -28,6 +29,33 @@
 #define SECRET_B32_MAX 64                    /* buffer del secreto en Base32 */
 #define RATE_LIMIT 3                         /* fallos consecutivos permitidos antes de bloquear */
 #define TIEMPO_RATE_LIMIT 300                /* segundos de bloqueo tras alcanzar RATE_LIMIT */
+
+/* Archivo root-only de config+estado por usuario: <TSI_STATE_DIR>/<uid>_tsi_config */
+#define TSI_STATE_DIR "/var/lib/tsi_authenticator"
+#define STATE_FILE_SUFFIX "_tsi_config"
+
+/* Config y estado del archivo root-only de cada usuario.
+   window/rate_limit/lock_time los fija el admin (con defaults);
+   fail_count/locked_until los gestiona el modulo (rate-limit). */
+typedef struct AuthState
+{
+    unsigned window;       /* codigos validos simultaneos (tolerancia de reloj) */
+    unsigned rate_limit;   /* fallos consecutivos permitidos antes de bloquear */
+    unsigned lock_time;    /* segundos de bloqueo al alcanzar rate_limit */
+    unsigned fail_count;   /* estado: fallos consecutivos acumulados */
+    long     locked_until; /* estado: epoch hasta el que el acceso esta bloqueado (0 = libre) */
+} AuthState;
+
+/* Construye <TSI_STATE_DIR>/<uid>_tsi_config en 'buf' (ruta fija, sin overrides). 0 OK, -1 error. */
+int build_state_path(uid_t uid, char *buf, size_t size);
+
+/* Asegura que exista 'dir' con permisos 0700. 0 OK (existia o se creo), -1 error. */
+int ensure_state_dir(const char *dir);
+
+/* Crea el archivo root-only de config+estado con los valores de 'state'.
+   Falla (sin tocar nada) si el archivo ya existe: no pisa config/estado previos.
+   Devuelve 0 si lo creo, 1 si ya existia, -1 si hubo error. */
+int create_config_file(const char *path, const AuthState *state);
 
 /* Funcion encargada de validar un código TOTP */
 int validate_token(const char *secret_b32, const char *code, unsigned window, int *valid);

@@ -15,7 +15,7 @@ Taller de Seguridad Informática — Bruno Scanziani, Agustín Manganelli
 ## SYNOPSIS
 
 ```
-auth    required    pam_tsi_authenticator.so [debug] [nullok] [window=N]
+auth    required    pam_tsi_authenticator.so [debug] [nullok] [window=N] [rate_limit=N] [lock_time=N]
 ```
 
 ```
@@ -30,7 +30,7 @@ Provee un segundo factor TOTP para servicios PAM (típicamente SSH). Implementa 
 
 1. Resuelve el usuario.
 2. Baja privilegios al usuario y lee el `SECRET` de su home (`~/.tsi_authenticator`); restaura privilegios.
-3. Como root, lee la config y el estado del archivo root-only (`/var/lib/tsi_authenticator/<uid>_tsi_config`).
+3. Como root, lee la config y el estado del archivo root-only (`/var/lib/tsi_authenticator/<uid>_tsi_config`). Si ese archivo **no existe** (usuario no enrolado correctamente), deniega.
 4. **Rate-limit:** si el usuario está bloqueado (`LOCKED_UNTIL` en el futuro), deniega sin pedir el código.
 5. Solicita el código TOTP (sin eco).
 6. Calcula los códigos válidos dentro de la ventana de tolerancia y compara.
@@ -38,7 +38,7 @@ Provee un segundo factor TOTP para servicios PAM (típicamente SSH). Implementa 
 8. **Éxito:** resetea el contador de fallos, registra el código usado y devuelve `PAM_SUCCESS`.
 9. **Fallo:** incrementa `FAIL_COUNT`; al alcanzar `RATE_LIMIT` fija un bloqueo de `LOCK_TIME` segundos y devuelve `PAM_AUTH_ERR`.
 
-El archivo root-only lo crea el módulo (que corre como root) en el primer login, con los valores por defecto; el admin puede editarlo luego.
+El archivo root-only lo crea `tsi-enroll` al enrolar (mediante el helper setuid `tsi-config-init`), con los valores por defecto. El módulo **no** lo crea; el admin puede editarlo luego.
 
 ### Parámetros del esquema (fijos)
 
@@ -53,7 +53,7 @@ El archivo root-only lo crea el módulo (que corre como root) en el primer login
 
 - **debug** — mensajes de diagnóstico a syslog (sin secretos ni códigos).
 - **nullok** — permite el acceso a usuarios sin secreto configurado. Sin esta opción, se rechazan. Usar solo durante el despliegue gradual.
-- **window=N** — ventana por defecto si el archivo del usuario no define `WINDOW`.
+- **window=N**, **rate_limit=N**, **lock_time=N** — defaults de política si el archivo del usuario no define esa clave. El archivo tiene precedencia; en la práctica siempre la define (la escribe el enroll), así que son un *fallback*.
 
 ---
 
@@ -67,7 +67,7 @@ SECRET=<Base32>
 
 - `SECRET` — secreto TOTP en Base32. **No divulgar.**
 
-**`/var/lib/tsi_authenticator/<uid>_tsi_config`** — config y estado por usuario. Permisos `0600`, propiedad de **root** (el usuario no puede leerlo ni editarlo). Lo crea el módulo en el primer login:
+**`/var/lib/tsi_authenticator/<uid>_tsi_config`** — config y estado por usuario. Permisos `0600`, propiedad de **root** (el usuario no puede leerlo ni editarlo). Lo crea `tsi-enroll` al enrolar (vía el helper setuid `tsi-config-init`), con los valores por defecto; el `USED_CODE` aparece recién en el primer login exitoso:
 
 ```
 WINDOW=3
@@ -93,6 +93,7 @@ Estado gestionado por el módulo (**no editar**):
 Otras rutas:
 
 - **`pam_tsi_authenticator.so`** — Ubuntu: `/usr/lib/x86_64-linux-gnu/security/`; Rocky: `/usr/lib64/security/`.
+- **`/usr/local/bin/tsi-config-init`** — helper setuid root que crea el archivo de config. Permisos `4755`.
 - **`/etc/pam.d/sshd`** — activación del módulo para SSH.
 - **`/etc/ssh/sshd_config`** (o `sshd_config.d/`) — flujo interactivo de SSH.
 
@@ -102,7 +103,9 @@ Otras rutas:
 
 ### Habilitar 2FA para un usuario
 
-El usuario ejecuta `tsi-enroll` (sin `sudo`), escanea el QR con una app de 8 dígitos (Aegis, FreeOTP, Raivo, 2FAS) y confirma con un código.
+El usuario ejecuta `tsi-enroll` (sin `sudo`), escanea el QR con una app de 8 dígitos (Aegis, FreeOTP, Raivo, 2FAS) y confirma con un código. Al confirmar, `tsi-enroll` crea el secreto en su home y, mediante el helper setuid, el archivo de config root-only.
+
+Re-enrolar (volver a correr `tsi-enroll`) genera un secreto nuevo pero **conserva** el archivo de config existente: no resetea el contador de fallos ni un bloqueo activo. Para partir de cero, borrar antes el config (ver más abajo).
 
 ### Deshabilitar 2FA para un usuario
 
@@ -185,6 +188,7 @@ sudo systemctl restart sshd     # en Ubuntu puede ser 'ssh'
 ## SECURITY CONSIDERATIONS
 
 - **Estado a prueba de manipulación.** La config y el estado (`FAIL_COUNT`, `LOCKED_UNTIL`, `USED_CODE`) viven en `/var/lib/tsi_authenticator/<uid>_tsi_config`, propiedad de root (`0600`) en un directorio `0700` de root. El usuario **no puede** leerlo ni editarlo: no puede resetear su contador de fallos, levantar su bloqueo ni borrar el historial de replay. Así el rate-limit y el No-Replay son robustos incluso frente a un usuario con shell local.
+- **Helper setuid mínimo.** El archivo de config lo crea `tsi-config-init`, un helper setuid root chico y sin dependencias de crypto. Toma el uid objetivo de `getuid()` (nunca de argumentos: un usuario solo crea su propio archivo), arma la ruta con la constante compilada (ignora entorno y `statedir=`), y crea el archivo con `O_EXCL`: **si ya existe no lo pisa**, por lo que un usuario no puede correrlo para resetear su bloqueo ni la política del admin.
 - **No-Replay.** Un código válido no puede reutilizarse mientras siga vigente: el módulo guarda los códigos usados (root-only) y rechaza cualquier repetición. Las entradas vencidas se purgan automáticamente y el archivo se reescribe de forma atómica (temporal + `rename`). Un replay cuenta como intento fallido.
 - **Rate-limit.** Tras `RATE_LIMIT` fallos consecutivos el acceso se bloquea `LOCK_TIME` segundos; durante el bloqueo se deniega sin pedir el código.
 - **Protección del secreto.** El `SECRET` vive en el home del usuario (`0600`); lo pueden leer el usuario propietario y root. La app ya lo posee, así que el usuario conocerlo no agrega riesgo; el punto sensible (estado/config) quedó fuera de su alcance.

@@ -68,6 +68,14 @@ static int parse_args(pam_handle_t *pamh, int argc, const char **argv, Params *p
         {
             params->window = atoi(argv[i] + 7);
         }
+        else if (strncmp(argv[i], "rate_limit=", 11) == 0)
+        {
+            params->rate_limit = (unsigned)atoi(argv[i] + 11);
+        }
+        else if (strncmp(argv[i], "lock_time=", 10) == 0)
+        {
+            params->lock_time = (unsigned)atoi(argv[i] + 10);
+        }
         else
         {
             pam_syslog(pamh, LOG_ERR, "Argumento desconocido: %s", argv[i]);
@@ -153,15 +161,7 @@ static int get_state_path(uid_t uid, const Params *params, char **path_out)
     return 0;
 }
 
-/* Asegura que exista el directorio root-only del estado, con permisos 0700.
-   0 OK (ya existia o se creo), -1 error. */
-static int ensure_state_dir(const char *dir)
-{
-    if (mkdir(dir, 0700) == 0) {
-        return 0;
-    }
-    return (errno == EEXIST) ? 0 : -1;
-}
+/* ensure_state_dir() y build_state_path() viven en tsi_state.c (compartidas con el helper). */
 
 /* Baja la identidad de filesystem al usuario para no hacer cosas con root innecesariamente
    Guarda los valores previos para poder restaurar. 0 OK, -1 error. */
@@ -197,16 +197,11 @@ static int restore_privileges(gid_t old_gid, uid_t old_uid)
     return 0;
 }
 
-/* Reescribe (o crea) el archivo root-only de config+estado del usuario:
-   - conserva las lineas de config (WINDOW, RATE_LIMIT, LOCK_TIME, etc.),
-   - reescribe FAIL_COUNT y LOCKED_UNTIL con los valores de 'state',
-   - conserva solo las entradas USED_CODE vigentes (dentro de CODE_MAX_AGE), acotadas a
-     MAX_USED_ENTRIES (descarta las mas viejas),
-   - si 'new_used_code' != NULL, lo agrega como USED_CODE con el timestamp actual (No-Replay).
-   Si el archivo no existe todavia lo crea, volcando WINDOW/RATE_LIMIT/LOCK_TIME desde 'state'
-   (los defaults) para que el admin los vea y edite.
-   La reescritura es atomica: se escribe un archivo temporal y se hace rename sobre el original.
-   Devuelve 0 si OK, -1 si hubo error. */
+/* Reescribe el archivo root-only de config+estado del usuario (debe existir ya, lo crea el enroll):
+   conserva las lineas de config, reescribe FAIL_COUNT y LOCKED_UNTIL con los valores de 'state',
+   conserva solo las entradas USED_CODE vigentes (dentro de CODE_MAX_AGE), acotadas a MAX_USED_ENTRIES (descarta las mas viejas),
+   si 'new_used_code' != NULL, lo agrega como USED_CODE con el timestamp actual (No-Replay).
+   Devuelve 0 si OK, -1 si hubo error (incluido: el archivo no existe). */
 static int persist_auth_state(const char *path, const AuthState *state, const char *new_used_code) {
     if (path == NULL || state == NULL) {
         return -1;
@@ -222,30 +217,24 @@ static int persist_auth_state(const char *path, const AuthState *state, const ch
     int  n_used = 0;
 
     int result = -1;
-    int creating = 0;
     char *tmp_path = NULL;
     FILE *out = NULL;
     FILE *in = NULL;
 
-    /* Leo el archivo actual y clasifico sus lineas. Si no existe, lo creo desde cero. */
+    /* Leo el archivo actual y clasifico sus lineas. Debe existir (lo crea el enroll). */
     int fd_in = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd_in < 0) {
-        if (errno == ENOENT) {
-            creating = 1;   /* primer uso: escribo un archivo nuevo con los defaults */
-        } else {
-            /* ELOOP (symlink) u otro error: no reescribo nada. */
-            return -1;
-        }
-    } else {
-        in = fdopen(fd_in, "r");
-        if (!in) {
-            close(fd_in);
-            return -1;
-        }
+        /* ENOENT (no enrolado), ELOOP (symlink) u otro error: no reescribo nada. */
+        return -1;
+    }
+    in = fdopen(fd_in, "r");
+    if (!in) {
+        close(fd_in);
+        return -1;
     }
 
     char line[USED_LINE_SIZE];
-    while (in != NULL && fgets(line, sizeof(line), in) != NULL) {
+    while (fgets(line, sizeof(line), in) != NULL) {
         line[strcspn(line, "\r\n")] = '\0';   /* quito el salto de linea */
 
         /* Las lineas de estado del rate-limit las reescribo desde 'state', no las conservo. */
@@ -257,7 +246,7 @@ static int persist_auth_state(const char *path, const AuthState *state, const ch
         int is_used = (strncmp(line, USED_CODE_KEY "=", used_key_len + 1) == 0);
 
         if (!is_used) {
-            /* Linea de config (WINDOW/RATE_LIMIT/LOCK_TIME/...): la conservo verbatim.
+            /* Linea de config (WINDOW/RATE_LIMIT/LOCK_TIME/...): la conservo
                Si no hay espacio, aborto antes que perder config del admin. */
             if (n_config >= MAX_CONFIG_LINES) {
                 goto cleanup;
@@ -322,15 +311,7 @@ static int persist_auth_state(const char *path, const AuthState *state, const ch
         goto cleanup;
     }
 
-    /* Archivo nuevo: vuelco la config (defaults) para que el admin la vea y edite. */
-    if (creating) {
-        if (fprintf(out, "%s=%u\n", WINDOW_KEY, state->window) < 0 ||
-            fprintf(out, "%s=%u\n", RATE_LIMIT_KEY, state->rate_limit) < 0 ||
-            fprintf(out, "%s=%u\n", LOCK_TIME_KEY, state->lock_time) < 0) {
-            goto cleanup;
-        }
-    }
-    /* Archivo existente: conservo la config verbatim (respeta lo que edito el admin). */
+    /* Conservo la config verbatim (respeta lo que edito el admin). */
     for (int i = 0; i < n_config; i++) {
         if (fprintf(out, "%s\n", config_lines[i]) < 0) {
             goto cleanup;
@@ -450,17 +431,21 @@ static int read_home_secret(const char *path, char *secret_out, size_t out_size,
 
 /* Lee la config y el estado del rate-limit desde el archivo root-only hacia 'state':
    WINDOW, RATE_LIMIT, LOCK_TIME (config) y FAIL_COUNT, LOCKED_UNTIL (estado).
-   Cada campo se sobrescribe solo si la clave está presente; si falta o el archivo no
-   existe todavia, se conserva el default que traia 'state'. 0 OK, -1 error. */
-static int read_state_file(const char *path, AuthState *state)
+   found = 1 si el archivo existia y se pudo abrir, 0 si no.
+   Cada campo se sobrescribe solo si la clave está presente; si falta, se conserva el
+   default que traia 'state'. 0 OK (incluso si no existe), -1 error. */
+static int read_state_file(const char *path, AuthState *state, int *found)
 {
+    *found = 0;
+
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) {
         if (errno == ENOENT || errno == ELOOP) {
-            return 0;   /* sin archivo: se usan los defaults */
+            return 0;   /* sin archivo (o symlink): found queda en 0 */
         }
         return -1;
     }
+    *found = 1;
 
     FILE *file = fdopen(fd, "r");
     if (!file) {
@@ -631,15 +616,18 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
         .debug = 0,
         .nullok = NULLERR,
         .secret_filename = NULL,
+        .state_dir = NULL,
         .digits = DEFAULT_DIGITS,
         .period = DEFAULT_PERIOD,
-        .window = DEFAULT_WINDOW};
+        .window = DEFAULT_WINDOW,
+        .rate_limit = RATE_LIMIT,
+        .lock_time = TIEMPO_RATE_LIMIT};
 
-    /* Config y estado desde el archivo; arranca con los defaults. */
+    /* Defaults del rate-limit: los args del modulo. El archivo de config los pisa si estan. */
     AuthState state = {
         .window = (unsigned)params.window,
-        .rate_limit = RATE_LIMIT,
-        .lock_time = TIEMPO_RATE_LIMIT,
+        .rate_limit = params.rate_limit,
+        .lock_time = params.lock_time,
         .fail_count = 0,
         .locked_until = 0};
 
@@ -663,6 +651,11 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
         return PAM_AUTH_ERR;
     }
     debug_log(pamh, &params, "Argumentos del módulo procesados");
+
+    /* Ya con los args parseados, fijo los defaults del estado (el archivo los pisa si estan). */
+    state.window = (unsigned)params.window;
+    state.rate_limit = params.rate_limit;
+    state.lock_time = params.lock_time;
 
     if (get_uid_gid(pamh, &uid, &gid) != 0)
     {
@@ -719,9 +712,16 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
     }
 
     /* Leo la config y el estado del rate-limit del archivo root-only (como root). */
-    if (read_state_file(state_path, &state) != 0)
+    int state_found = 0;
+    if (read_state_file(state_path, &state, &state_found) != 0)
     {
         pam_syslog(pamh, LOG_ERR, "No se pudo leer el estado del rate-limit");
+        goto cleanup;
+    }
+    if (!state_found)
+    {
+        /* Tiene secreto pero no hay archivo de config: enrolamiento incompleto. Deniego. */
+        pam_syslog(pamh, LOG_ERR, "Falta el archivo de config del usuario; re-enrolar. Denegando acceso");
         goto cleanup;
     }
 

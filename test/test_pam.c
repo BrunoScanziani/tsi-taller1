@@ -6,6 +6,10 @@
     y ejecuta cada escenario con una conversacion propia que inyecta el codigo.
     Los codigos validos se calculan con el mismo get_totp_at que usa el modulo.
 
+    El archivo de config root-only se pre-crea aca (via statedir=), porque el modulo
+    ya no lo crea lazy: lo crea tsi-enroll con el helper setuid tsi-config-init, que
+    escribe en /var/lib y necesita root, asi que queda fuera de esta suite sin-root.
+
     Uso: ./test_pam <ruta_absoluta_al_.so>
 */
 
@@ -187,8 +191,6 @@ int main(int argc, char **argv)
     char workdir[] = "/tmp/tsi_test_XXXXXX";
     if (!mkdtemp(workdir)) { perror("mkdtemp"); return 2; }
 
-    /* El parser de config de PAM separa por espacios: si la ruta del .so tiene
-       espacios (p.ej. "Taller 1"), no lo encuentra. Uso un symlink sin espacios. */
     char module_link[PATH_MAX];
     snprintf(module_link, sizeof(module_link), "%s/module.so", workdir);
     if (symlink(so_abs, module_link) != 0) { perror("symlink modulo"); return 2; }
@@ -210,6 +212,7 @@ int main(int argc, char **argv)
     /* ============ 1) Codigo correcto ============ */
     printf("== Casos correctos ==\n");
     unlink(state_path);   /* estado limpio */
+    write_state_file(state_path, DEFAULT_WINDOW, 3, 300);   /* config con defaults (ya no se crea lazy) */
     write_home_secret(secret_ok, TEST_SECRET);
     write_service(workdir, "ok", module_link, secret_ok, workdir, 0);
     {
@@ -222,6 +225,7 @@ int main(int argc, char **argv)
     /* ============ 2) Codigo incorrecto ============ */
     printf("\n== Casos incorrectos ==\n");
     unlink(state_path);   /* estado limpio */
+    write_state_file(state_path, DEFAULT_WINDOW, 3, 300);   /* config con defaults (ya no se crea lazy) */
     {
         char *code = wrong_code(TEST_SECRET);
         int rc = try_auth(workdir, "ok", user, code);
@@ -237,12 +241,23 @@ int main(int argc, char **argv)
     /* ============ 3) Replay ============ */
     printf("\n== No-Replay ==\n");
     unlink(state_path);   /* estado limpio */
+    write_state_file(state_path, DEFAULT_WINDOW, 3, 300);   /* config con defaults (ya no se crea lazy) */
     {
         char *code = current_code(TEST_SECRET);
         int rc1 = try_auth(workdir, "ok", user, code);
         check_rc("replay: 1er uso del codigo => SUCCESS", rc1, PAM_SUCCESS);
         int rc2 = try_auth(workdir, "ok", user, code);
         check_rc("replay: 2do uso del MISMO codigo => AUTH_ERR", rc2, PAM_AUTH_ERR);
+        free(code);
+    }
+
+    /* ============ 3b) Config faltante: fail closed ============ */
+    printf("\n== Config faltante ==\n");
+    unlink(state_path);   /* hay secreto en el home pero NO hay archivo de config */
+    {
+        char *code = current_code(TEST_SECRET);
+        int rc = try_auth(workdir, "ok", user, code);
+        check_rc("con secreto pero sin config => AUTH_ERR", rc, PAM_AUTH_ERR);
         free(code);
     }
 

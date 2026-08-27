@@ -6,6 +6,7 @@ Productos:
 
 - **`pam_tsi_authenticator.so`** — módulo PAM que verifica el código TOTP.
 - **`tsi-enroll`** — genera y registra el secreto del usuario.
+- **`tsi-config-init`** — helper setuid root que crea el archivo de config root-only del usuario (lo invoca `tsi-enroll`).
 
 ---
 
@@ -62,7 +63,7 @@ make
 sudo make install
 ```
 
-`make install` detecta la ruta de módulos PAM según la distro y crea el directorio root-only `/var/lib/tsi_authenticator/` (`0700`), donde el módulo guarda la config y el estado de cada usuario.
+`make install` detecta la ruta de módulos PAM según la distro, instala el helper `tsi-config-init` **setuid root** (`4755`) en `/usr/local/bin/`, y crea el directorio root-only `/var/lib/tsi_authenticator/` (`0700`), donde vive la config y el estado de cada usuario.
 
 ---
 
@@ -90,6 +91,7 @@ Cada usuario lo ejecuta para sí mismo:
 1. Genera un secreto de 160 bits en `~/.tsi_authenticator` (permisos `0600`).
 2. Muestra el QR (requiere `qrencode`) y el secreto en texto.
 3. Pide un código para confirmar; si falla, elimina el secreto.
+4. Al confirmar, crea el archivo de config root-only vía `tsi-config-init` (requiere que el helper esté instalado setuid; ver sección 5).
 
 > **8 dígitos.** Google Authenticator no los soporta. Usar **Aegis** o **FreeOTP** (Android), **Raivo** / **2FAS** (iOS). Prueba sin teléfono:
 > `oathtool --totp -b --digits=8 <SECRETO_BASE32>`.
@@ -101,7 +103,7 @@ ls -l ~/.tsi_authenticator     # -rw------- (0600), dueño = usuario
 cat ~/.tsi_authenticator       # SECRET=<Base32>
 ```
 
-La **config y el estado** viven aparte, en un archivo **root-only** que crea el módulo en el primer login:
+La **config y el estado** viven aparte, en un archivo **root-only** que crea `tsi-enroll` al enrolar (vía el helper setuid):
 
 ```bash
 sudo cat /var/lib/tsi_authenticator/$(id -u)_tsi_config
@@ -113,10 +115,10 @@ RATE_LIMIT=3                      # config (admin): fallos antes de bloquear
 LOCK_TIME=300                     # config (admin): segundos de bloqueo
 FAIL_COUNT=0                      # estado (módulo)
 LOCKED_UNTIL=0                    # estado (módulo): epoch de fin de bloqueo, 0 = libre
-USED_CODE=<timestamp>:<codigo>    # estado (módulo): No-Replay
+USED_CODE=<timestamp>:<codigo>    # estado (módulo): aparece tras el primer login (No-Replay)
 ```
 
-`WINDOW`, `RATE_LIMIT` y `LOCK_TIME` los ajusta el admin (como root). El resto lo gestiona el módulo; no editarlo (salvo `LOCKED_UNTIL=0` para desbloquear a un usuario). El usuario no tiene acceso a este archivo.
+`WINDOW`, `RATE_LIMIT` y `LOCK_TIME` los ajusta el admin (como root). El resto lo gestiona el módulo; no editarlo (salvo `LOCKED_UNTIL=0` para desbloquear a un usuario). El usuario no tiene acceso a este archivo. Re-enrolar conserva este archivo (no resetea el bloqueo ni la política).
 
 ---
 
@@ -220,6 +222,7 @@ pamtester tsi-test $USER authenticate
 | Rechazo sin error claro (Rocky) | SELinux | `restorecon`, revisar AVC |
 | No aparece el prompt del código | `KbdInteractiveAuthentication no` | Corregir `sshd_config` |
 | Entra sin pedir código | Login por clave pública | Autenticarse con contraseña |
+| Login siempre denegado tras enrolar | Falta el config root-only (helper no instalado o falló) | Re-enrolar con `tsi-config-init` instalado setuid; ver log del módulo |
 | Código válido rechazado al reintentar | No-Replay (código ya usado) | Esperar el siguiente código |
 | "Demasiados intentos fallidos" | Rate-limit activo | Esperar `LOCK_TIME`, o `LOCKED_UNTIL=0` en `/var/lib/tsi_authenticator/<uid>_tsi_config` (root) |
 | El QR no aparece | Falta `qrencode` | Instalar `qrencode` |
@@ -229,7 +232,8 @@ pamtester tsi-test $USER authenticate
 ## 12. Desinstalación
 
 ```bash
-sudo make uninstall
+sudo make uninstall     # quita del sistema: tsi-enroll, tsi-config-init, el .so y /var/lib/tsi_authenticator
+make remove             # además de uninstall, borra los binarios locales (equivale a uninstall + clean)
 ```
 
-No borra los datos por usuario: los secretos en `~/.tsi_authenticator` ni la config/estado en `/var/lib/tsi_authenticator/`; eliminarlos por separado si se desea.
+`uninstall` elimina también `/var/lib/tsi_authenticator/` (con la config/estado de todos los usuarios). Los secretos en cada `~/.tsi_authenticator` no se tocan; borrarlos por separado si se desea.
