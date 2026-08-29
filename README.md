@@ -26,7 +26,8 @@ Módulo destino: `/usr/lib/x86_64-linux-gnu/security/`.
 
 ```bash
 sudo dnf install epel-release          # si falla: sudo dnf config-manager --set-enabled crb
-sudo dnf install gcc make cmake git pam-devel libgcrypt-devel qrencode
+sudo dnf install gcc make cmake git pam-devel libgcrypt-devel qrencode \
+    selinux-policy-devel policycoreutils-python-utils
 ```
 
 Módulo destino: `/usr/lib64/security/`.
@@ -55,5 +56,7 @@ sudo make install
 ```
 
 `make install` detecta la ruta de módulos PAM según la distro y crea el directorio root-only `/var/lib/tsi_authenticator/` (`0700`), donde el módulo guarda la config y el estado de cada usuario.
+Si SELinux esta activo, tambien compila e instala automaticamente la politica minima
+para que PAM pueda leer la clave maestra y actualizar ese estado.
 
 ---

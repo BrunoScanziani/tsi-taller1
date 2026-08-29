@@ -32,6 +32,12 @@ SEED_CRYPTO      := tsi-seed-crypto
 SEED_CRYPTO_SRC  := src/tsi_seed_crypto.c
 SEED_CRYPTO_LIBS := -lgcrypt
 
+# Politica necesaria cuando SELinux esta activo (Rocky/RHEL/Fedora).
+SELINUX_POLICY := tsi_authenticator
+SELINUX_DIR    := selinux
+SELINUX_MAKE   := /usr/share/selinux/devel/Makefile
+KEYDIR         := /etc/tsi_authenticator
+
 # Suite de tests (integracion contra el .so real via libpam)
 TEST_BIN    := test/test_pam
 TEST_SRC    := test/test_pam.c
@@ -82,9 +88,29 @@ install: $(ENROLL) $(MODULE) $(HELPER) $(KEY_INIT) $(SEED_CRYPTO)
 	install -d $(SECURITYDIR)
 	install -m 0644 $(MODULE) $(SECURITYDIR)/$(MODULE)
 	install -d -m 0700 $(STATEDIR)
+	@if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then \
+		if [ ! -f "$(SELINUX_MAKE)" ] || ! command -v semanage >/dev/null 2>&1; then \
+			echo "Error: SELinux esta activo. Instale selinux-policy-devel y policycoreutils-python-utils."; \
+			exit 1; \
+		fi; \
+		$(MAKE) -f "$(SELINUX_MAKE)" -C "$(SELINUX_DIR)" "$(SELINUX_POLICY).pp" || exit 1; \
+		semodule -i "$(SELINUX_DIR)/$(SELINUX_POLICY).pp" || exit 1; \
+		semanage fcontext -a -t tsi_auth_state_t '$(STATEDIR)(/.*)?' 2>/dev/null || \
+			semanage fcontext -m -t tsi_auth_state_t '$(STATEDIR)(/.*)?' || exit 1; \
+		semanage fcontext -a -t tsi_auth_key_t '$(KEYDIR)/master\.key' 2>/dev/null || \
+			semanage fcontext -m -t tsi_auth_key_t '$(KEYDIR)/master\.key' || exit 1; \
+		restorecon -R "$(STATEDIR)" "$(KEYDIR)" || exit 1; \
+	fi
 
 # Deja el sistema limpio de todo lo que puso 'make install'
 uninstall:
+	@if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled && \
+		command -v semanage >/dev/null 2>&1; then \
+		semanage fcontext -d '$(STATEDIR)(/.*)?' 2>/dev/null || true; \
+		semanage fcontext -d '$(KEYDIR)/master\.key' 2>/dev/null || true; \
+		restorecon -R "$(KEYDIR)" 2>/dev/null || true; \
+		semodule -r "$(SELINUX_POLICY)" 2>/dev/null || true; \
+	fi
 	rm -f /usr/local/bin/$(ENROLL)
 	rm -f /usr/local/bin/$(HELPER)
 	rm -f /usr/local/bin/$(SEED_CRYPTO)
@@ -94,6 +120,8 @@ uninstall:
 
 clean:
 	rm -f $(ENROLL) $(MODULE) $(HELPER) $(KEY_INIT) $(SEED_CRYPTO) $(TEST_BIN) src/*.o
+	rm -f $(SELINUX_DIR)/$(SELINUX_POLICY).pp $(SELINUX_DIR)/$(SELINUX_POLICY).cil
+	rm -f $(SELINUX_DIR)/tmp/*.tmp $(SELINUX_DIR)/tmp/*.te $(SELINUX_DIR)/tmp/*.mod
 
 # Limpieza total: desinstala del sistema y borra los binarios locales
 remove: uninstall clean

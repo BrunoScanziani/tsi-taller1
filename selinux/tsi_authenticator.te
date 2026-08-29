@@ -1,0 +1,25 @@
+policy_module(tsi_authenticator, 1.0)
+
+require {
+    type sshd_session_t;
+    class dir { add_name getattr remove_name search write };
+    class file { create getattr open read rename setattr unlink write };
+}
+
+# Estado persistente del rate-limit y de codigos TOTP usados.
+type tsi_auth_state_t;
+files_type(tsi_auth_state_t)
+
+# Clave maestra: SSH/PAM solo necesita leerla.
+type tsi_auth_key_t;
+files_type(tsi_auth_key_t)
+
+allow sshd_session_t tsi_auth_state_t:dir {
+    add_name getattr remove_name search write
+};
+allow sshd_session_t tsi_auth_state_t:file {
+    create getattr open read rename setattr unlink write
+};
+allow sshd_session_t tsi_auth_key_t:file {
+    getattr open read
+};
