@@ -282,6 +282,34 @@ int save_secret(const char *path, const char *secret_b32)
     return 0;
 }
 
+/* Guarda un blob binario (nonce + tag + ciphertext) en el home del usuario. */
+int save_encrypted_secret(const char *path, const unsigned char *blob, size_t blob_len)
+{
+    if (path == NULL || blob == NULL || blob_len == 0)
+        return -1;
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0 || fchmod(fd, 0600) != 0) {
+        if (fd >= 0)
+            close(fd);
+        return -1;
+    }
+
+    size_t written = 0;
+    while (written < blob_len) {
+        ssize_t n = write(fd, blob + written, blob_len - written);
+        if (n > 0)
+            written += (size_t)n;
+        else if (n < 0 && errno == EINTR)
+            continue;
+        else {
+            close(fd);
+            return -1;
+        }
+    }
+    return close(fd) == 0 ? 0 : -1;
+}
+
 /* Borra el archivo del secreto 0 OK, -1 error. */
 int delete_secret(const char *path)
 {

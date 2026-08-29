@@ -24,6 +24,14 @@ ENROLL_LIBS := -lcotp -lgcrypt
 HELPER      := tsi-config-init
 HELPER_SRC  := src/tsi_config_init.c
 
+KEY_INIT      := tsi-key-init
+KEY_INIT_SRC  := src/tsi_key_init.c
+KEY_INIT_LIBS := -lgcrypt
+
+SEED_CRYPTO      := tsi-seed-crypto
+SEED_CRYPTO_SRC  := src/tsi_seed_crypto.c
+SEED_CRYPTO_LIBS := -lgcrypt
+
 # Suite de tests (integracion contra el .so real via libpam)
 TEST_BIN    := test/test_pam
 TEST_SRC    := test/test_pam.c
@@ -35,7 +43,7 @@ SECURITYDIR ?= $(shell test -d /usr/lib64/security && echo /usr/lib64/security |
 
 # --- Targets ---
 
-all: $(ENROLL) $(MODULE) $(HELPER)
+all: $(ENROLL) $(MODULE) $(HELPER) $(KEY_INIT) $(SEED_CRYPTO)
 
 # El módulo se compila como objeto compartido: -fPIC -shared
 $(MODULE): $(MODULE_SRC) $(LIBSRC) $(STATESRC)
@@ -49,6 +57,12 @@ $(ENROLL): $(ENROLL_SRC) $(LIBSRC) $(STATESRC)
 $(HELPER): $(HELPER_SRC) $(STATESRC)
 	$(CC) $(CFLAGS) -o $@ $(HELPER_SRC) $(STATESRC)
 
+$(KEY_INIT): $(KEY_INIT_SRC)
+	$(CC) $(CFLAGS) -o $@ $(KEY_INIT_SRC) $(KEY_INIT_LIBS)
+
+$(SEED_CRYPTO): $(SEED_CRYPTO_SRC)
+	$(CC) $(CFLAGS) -o $@ $(SEED_CRYPTO_SRC) $(SEED_CRYPTO_LIBS)
+
 # Compila el modulo y corre la suite de tests contra el .so recien construido.
 $(TEST_BIN): $(TEST_SRC) $(MODULE)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SRC) $(TEST_LIBS)
@@ -59,9 +73,12 @@ test: $(TEST_BIN)
 # Directorio root-only donde el modulo guarda config+estado por usuario (<uid>_tsi_config)
 STATEDIR ?= /var/lib/tsi_authenticator
 
-install: $(ENROLL) $(MODULE) $(HELPER)
+install: $(ENROLL) $(MODULE) $(HELPER) $(KEY_INIT) $(SEED_CRYPTO)
 	install -m 0755 $(ENROLL) /usr/local/bin/
 	install -m 4755 $(HELPER) /usr/local/bin/
+	install -m 4755 $(SEED_CRYPTO) /usr/local/bin/
+	install -m 0755 $(KEY_INIT) /usr/local/sbin/
+	/usr/local/sbin/$(KEY_INIT)
 	install -d $(SECURITYDIR)
 	install -m 0644 $(MODULE) $(SECURITYDIR)/$(MODULE)
 	install -d -m 0700 $(STATEDIR)
@@ -70,11 +87,13 @@ install: $(ENROLL) $(MODULE) $(HELPER)
 uninstall:
 	rm -f /usr/local/bin/$(ENROLL)
 	rm -f /usr/local/bin/$(HELPER)
+	rm -f /usr/local/bin/$(SEED_CRYPTO)
+	rm -f /usr/local/sbin/$(KEY_INIT)
 	rm -f $(SECURITYDIR)/$(MODULE)
 	rm -rf $(STATEDIR)
 
 clean:
-	rm -f $(ENROLL) $(MODULE) $(HELPER) $(TEST_BIN) src/*.o
+	rm -f $(ENROLL) $(MODULE) $(HELPER) $(KEY_INIT) $(SEED_CRYPTO) $(TEST_BIN) src/*.o
 
 # Limpieza total: desinstala del sistema y borra los binarios locales
 remove: uninstall clean

@@ -82,6 +82,9 @@ int build_secret_path(char *path_out, size_t path_size);
    en el archivo root-only. */
 int save_secret(const char *path, const char *secret_b32);
 
+/* Guarda el blob binario cifrado en el archivo de secreto del usuario. */
+int save_encrypted_secret(const char *path, const unsigned char *blob, size_t blob_len);
+
 /* Funcion que borra el archivo de path, en este caso sera el secreto*/
 int delete_secret(const char *path);
 

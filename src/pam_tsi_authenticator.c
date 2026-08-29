@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <syslog.h>
 #include <time.h>
+#include <arpa/inet.h>
 
 /* pam modules para las funciones que hay que implementar, pam_ext para el log y la conversacion */
 #include <security/pam_modules.h>
@@ -33,6 +34,11 @@
 
 /* ESTO PODRIA NO IR CREO */
 #include "tsi_authenticator.h"
+#include "tsi_key_init.h"
+
+#define GCM_NONCE_SIZE 12
+#define GCM_TAG_SIZE 16
+#define ENCRYPTED_BLOB_MAX (1 + GCM_NONCE_SIZE + GCM_TAG_SIZE + SECRET_B32_MAX)
 
 /* Parsea los argumentos hacia Params.
    Devuelve 0 si OK, -1 si hay argumentos desconocidos. */
@@ -373,60 +379,89 @@ cleanup:
 }
 
 
-/* Lee el SECRET del archivo del home del usuario
-   found = 1 si el archivo existía y tenía el SECRET, 0 si no existe.
-   0 OK (incluso si no existe), -1 error. */
-static int read_home_secret(const char *path, char *secret_out, size_t out_size, int *found)
+/* Lee el blob binario VERSION|NONCE|TAG|CIPHERTEXT del home del usuario. */
+static int read_home_blob(const char *path, unsigned char *blob, size_t blob_size,
+                          size_t *blob_len, int *found)
 {
     *found = 0;
-
-    /* open con O_NOFOLLOW si el ultimo componente es un symlink, falla.
-       O_CLOEXEC no heredar el fd si se hace exec. */
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) {
         if (errno == ENOENT || errno == ELOOP) {
-            /* ENOENT no existe (no es error). ELOOP: era un symlink, lo rechazamos. */
             return 0;
         }
         return -1;
     }
-
-    FILE *file = fdopen(fd, "r");
-    if (!file) {
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        (size_t)st.st_size > blob_size) {
         close(fd);
         return -1;
     }
-
-    char line[SECRET_B32_MAX + 32];   /* holgado para "CLAVE=valor\n" */
-    int have_secret = 0;
-
-    while (fgets(line, sizeof(line), file) != NULL) {
-        line[strcspn(line, "\r\n")] = '\0';
-
-        char *eq = strchr(line, '=');
-        if (eq == NULL) {
-            continue;
-        }
-        *eq = '\0';
-        const char *key = line;
-        const char *value = eq + 1;
-
-        if (strcmp(key, SECRET_KEY) == 0) {
-            if (strlen(value) >= out_size) {   /* no entra en el buffer */
-                explicit_bzero(line, sizeof(line));
-                fclose(file);
-                return -1;
-            }
-            strcpy(secret_out, value);
-            have_secret = 1;
-        }
+    size_t received = 0;
+    while (received < (size_t)st.st_size) {
+        ssize_t n = read(fd, blob + received, (size_t)st.st_size - received);
+        if (n > 0) received += (size_t)n;
+        else if (n < 0 && errno == EINTR) continue;
+        else { close(fd); return -1; }
     }
-
-    explicit_bzero(line, sizeof(line));   /* la linea contuvo el secreto */
-    fclose(file);
-
-    *found = have_secret;
+    if (close(fd) != 0) return -1;
+    *blob_len = received;
+    *found = 1;
     return 0;
+}
+
+static int read_master_key(unsigned char key[MASTER_KEY_SIZE])
+{
+    struct stat st;
+    int fd = open(MASTER_KEY_PATH, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_uid != 0 || st.st_size != MASTER_KEY_SIZE) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    size_t received = 0;
+    while (received < MASTER_KEY_SIZE) {
+        ssize_t n = read(fd, key + received, MASTER_KEY_SIZE - received);
+        if (n > 0) received += (size_t)n;
+        else if (n < 0 && errno == EINTR) continue;
+        else { close(fd); return -1; }
+    }
+    return close(fd) == 0 ? 0 : -1;
+}
+
+static int decrypt_seed(const unsigned char *blob, size_t blob_len, uid_t uid,
+                        char secret_out[SECRET_B32_MAX])
+{
+    unsigned char key[MASTER_KEY_SIZE] = {0};
+    unsigned char aad[1 + sizeof(uint32_t)];
+    gcry_cipher_hd_t cipher = NULL;
+    size_t header_len = 1 + GCM_NONCE_SIZE + GCM_TAG_SIZE;
+    int rc = -1;
+
+    if (blob_len <= header_len || blob[0] != 1 ||
+        blob_len - header_len >= SECRET_B32_MAX || !gcry_check_version("1.8.0") ||
+        read_master_key(key) != 0) goto cleanup;
+    gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
+    aad[0] = 1;
+    uint32_t uid_net = htonl((uint32_t)uid);
+    memcpy(aad + 1, &uid_net, sizeof(uid_net));
+    const unsigned char *nonce = blob + 1;
+    const unsigned char *tag = nonce + GCM_NONCE_SIZE;
+    const unsigned char *ciphertext = tag + GCM_TAG_SIZE;
+    size_t ciphertext_len = blob_len - header_len;
+    if (gcry_cipher_open(&cipher, GCRY_CIPHER_AES256, GCRY_CIPHER_MODE_GCM, 0) != 0 ||
+        gcry_cipher_setkey(cipher, key, sizeof(key)) != 0 ||
+        gcry_cipher_setiv(cipher, nonce, GCM_NONCE_SIZE) != 0 ||
+        gcry_cipher_authenticate(cipher, aad, sizeof(aad)) != 0 ||
+        gcry_cipher_decrypt(cipher, secret_out, ciphertext_len, ciphertext, ciphertext_len) != 0 ||
+        gcry_cipher_checktag(cipher, tag, GCM_TAG_SIZE) != 0) goto cleanup;
+    secret_out[ciphertext_len] = '\0';
+    rc = 0;
+cleanup:
+    if (cipher) gcry_cipher_close(cipher);
+    explicit_bzero(key, sizeof(key));
+    if (rc != 0) explicit_bzero(secret_out, SECRET_B32_MAX);
+    return rc;
 }
 
 /* Lee la config y el estado del rate-limit desde el archivo root-only hacia 'state':
@@ -637,6 +672,8 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
     uid_t old_uid;
     char *secret_path = NULL;
     char *state_path = NULL;
+    unsigned char encrypted_blob[ENCRYPTED_BLOB_MAX] = {0};
+    size_t encrypted_blob_len = 0;
     char secret_b32[SECRET_B32_MAX] = {0};
     char code[DEFAULT_DIGITS + 1] = {0};
     int found = 0;
@@ -674,7 +711,7 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
         goto cleanup;
     }
 
-    /* Leo el SECRET bajando privilegios al usuario (el archivo esta en su home). */
+    /* Leo el blob cifrado bajando privilegios al usuario (el archivo esta en su home). */
     if (decrease_privileges(gid, uid, &old_gid, &old_uid) != 0)
     {
         pam_syslog(pamh, LOG_ERR, "No se pudieron reducir los privilegios efectivos");
@@ -683,7 +720,8 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
     privileges_lowered = 1;
     debug_log(pamh, &params, "Privilegios efectivos reducidos para leer el secreto");
 
-    if (read_home_secret(secret_path, secret_b32, sizeof(secret_b32), &found) != 0)
+    if (read_home_blob(secret_path, encrypted_blob, sizeof(encrypted_blob),
+                       &encrypted_blob_len, &found) != 0)
     {
         debug_log(pamh, &params, "No se pudo leer el secreto del usuario");
         goto cleanup;
@@ -695,7 +733,7 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
         goto cleanup;
     }
     privileges_lowered = 0;
-    debug_log(pamh, &params, found ? "Secreto encontrado" : "Secreto no encontrado");
+    debug_log(pamh, &params, found ? "Blob cifrado encontrado" : "Secreto no encontrado");
 
     if (!found)
     {
@@ -710,6 +748,14 @@ int tsi_authenticator(pam_handle_t *pamh, int flags, int argc, const char **argv
         }
         goto cleanup;
     }
+
+    /* Ya como root, verifico GCM y recupero el seed solo en memoria. */
+    if (decrypt_seed(encrypted_blob, encrypted_blob_len, uid, secret_b32) != 0)
+    {
+        pam_syslog(pamh, LOG_ERR, "No se pudo descifrar o autenticar el seed TOTP");
+        goto cleanup;
+    }
+    explicit_bzero(encrypted_blob, sizeof(encrypted_blob));
 
     /* Leo la config y el estado del rate-limit del archivo root-only (como root). */
     int state_found = 0;
@@ -818,6 +864,7 @@ cleanup:
     free(secret_path);
     free(state_path);
     explicit_bzero(secret_b32, sizeof(secret_b32));
+    explicit_bzero(encrypted_blob, sizeof(encrypted_blob));
     explicit_bzero(code, sizeof(code));
     return result;
 }
