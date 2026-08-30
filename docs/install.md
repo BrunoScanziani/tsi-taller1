@@ -6,7 +6,9 @@ Productos:
 
 - **`pam_tsi_authenticator.so`** — módulo PAM que verifica el código TOTP.
 - **`tsi-enroll`** — genera y registra el secreto del usuario.
-- **`tsi-config-init`** — helper setuid root que crea el archivo de config root-only del usuario (lo invoca `tsi-enroll`).
+- **`tsi-config-init`** — helper setuid root que crea el archivo de config root-only del usuario.
+- **`tsi-seed-crypto`** — helper setuid root que cifra el seed con la clave maestra.
+- **`tsi-key-init`** — crea la clave maestra; lo corre `make install` una vez, como root.
 
 ---
 
@@ -20,7 +22,7 @@ Productos:
 
 ---
 
-## 2. Ubuntu (24.04 LTS)
+## 2. Ubuntu Server (26.04 LTS)
 
 ```bash
 sudo apt update
@@ -36,6 +38,8 @@ Módulo destino: `/usr/lib/x86_64-linux-gnu/security/`.
 ```bash
 sudo dnf install epel-release          # si falla: sudo dnf config-manager --set-enabled crb
 sudo dnf install gcc make cmake git pam-devel libgcrypt-devel qrencode
+# Solo si SELinux está activo (por defecto lo está):
+sudo dnf install selinux-policy-devel policycoreutils-python-utils
 ```
 
 Módulo destino: `/usr/lib64/security/`.
@@ -63,7 +67,13 @@ make
 sudo make install
 ```
 
-`make install` detecta la ruta de módulos PAM según la distro, instala el helper `tsi-config-init` **setuid root** (`4755`) en `/usr/local/bin/`, y crea el directorio root-only `/var/lib/tsi_authenticator/` (`0700`), donde vive la config y el estado de cada usuario.
+`make install`:
+
+- Instala el módulo en la ruta PAM de la distro.
+- Instala los helpers `tsi-config-init` y `tsi-seed-crypto` **setuid root** (`4755`) en `/usr/local/bin/`, y `tsi-key-init` en `/usr/local/sbin/`.
+- Corre `tsi-key-init`, que genera la clave maestra en `/etc/tsi_authenticator/master.key` (`0400`, root) si no existe.
+- Crea el directorio root-only `/var/lib/tsi_authenticator/` (`0700`).
+- **Si SELinux está activo**, compila e instala el módulo de política `tsi_authenticator`, etiqueta la clave y el estado, y aplica `restorecon`. Aborta con un mensaje si faltan `selinux-policy-devel` o `policycoreutils-python-utils`.
 
 ---
 
@@ -88,20 +98,22 @@ Cada usuario lo ejecuta para sí mismo:
 ./tsi-enroll
 ```
 
-1. Genera un secreto de 160 bits en `~/.tsi_authenticator` (permisos `0600`).
-2. Muestra el QR (requiere `qrencode`) y el secreto en texto.
-3. Pide un código para confirmar; si falla, elimina el secreto.
-4. Al confirmar, crea el archivo de config root-only vía `tsi-config-init` (requiere que el helper esté instalado setuid; ver sección 5).
+1. Genera un seed de 160 bits.
+2. Muestra el QR (requiere `qrencode`) y el seed en texto.
+3. Pide un código para confirmar; si falla, no guarda nada.
+4. Al confirmar: guarda el seed **cifrado** en `~/.tsi_authenticator` (`0600`, vía `tsi-seed-crypto`) y crea el config root-only (vía `tsi-config-init`). Ambos helpers deben estar instalados setuid (ver sección 5).
 
 > **8 dígitos.** Google Authenticator no los soporta. Usar **Aegis** o **FreeOTP** (Android), **Raivo** / **2FAS** (iOS). Prueba sin teléfono:
 > `oathtool --totp -b --digits=8 <SECRETO_BASE32>`.
 
-Verificar (el home solo tiene el secreto):
+Verificar (el home tiene el seed cifrado, no texto legible):
 
 ```bash
 ls -l ~/.tsi_authenticator     # -rw------- (0600), dueño = usuario
-cat ~/.tsi_authenticator       # SECRET=<Base32>
+file ~/.tsi_authenticator      # data (blob binario AES-256-GCM)
 ```
+
+La clave maestra que descifra ese blob está en `/etc/tsi_authenticator/master.key` (`0400`, root).
 
 La **config y el estado** viven aparte, en un archivo **root-only** que crea `tsi-enroll` al enrolar (vía el helper setuid):
 
@@ -141,7 +153,7 @@ auth    substack    password-auth
 auth    include     postlogin
 ```
 
-Argumentos opcionales: `debug`, `nullok`, `window=N`.
+Argumentos opcionales: `debug`, `nullok`, `window=N`, `rate_limit=N`, `lock_time=N`.
 
 ### 8.2. Servidor SSH
 
@@ -179,11 +191,16 @@ sudo systemctl restart sshd     # en Ubuntu puede ser 'ssh'
 
 ## 9. Rocky: SELinux
 
+Con SELinux en enforcing, sin política la sesión SSH no puede leer la clave maestra ni el estado, y el login falla sin error claro. `make install` instala el módulo de política `tsi_authenticator` y etiqueta la clave (`tsi_auth_key_t`) y el estado (`tsi_auth_state_t`); requiere `selinux-policy-devel` y `policycoreutils-python-utils`.
+
+La política solo habilita el dominio de SSH (`sshd_session_t`). Otros servicios PAM (login local, `sudo`) correrían en otro dominio y darían denegaciones.
+
+Diagnóstico:
+
 ```bash
-sudo ausearch -m avc -ts recent          # buscar denegaciones del módulo
-restorecon -v ~/.tsi_authenticator       # corregir contexto
-sudo setenforce 0                         # permisivo (temporal, solo para pruebas)
-sudo setenforce 1                         # volver a enforcing
+sudo ausearch -m avc -ts recent          # ver denegaciones
+ls -Z /etc/tsi_authenticator/master.key /var/lib/tsi_authenticator   # verificar etiquetas
+sudo restorecon -Rv /etc/tsi_authenticator /var/lib/tsi_authenticator # reetiquetar
 ```
 
 ---
@@ -223,6 +240,8 @@ pamtester tsi-test $USER authenticate
 | No aparece el prompt del código | `KbdInteractiveAuthentication no` | Corregir `sshd_config` |
 | Entra sin pedir código | Login por clave pública | Autenticarse con contraseña |
 | Login siempre denegado tras enrolar | Falta el config root-only (helper no instalado o falló) | Re-enrolar con `tsi-config-init` instalado setuid; ver log del módulo |
+| Denegado tras enrolar, con AVC de la clave/estado (Rocky) | Falta o mal etiquetada la política SELinux | Reinstalar política; `restorecon` (sección 9) |
+| Denegado y "no se pudo leer/descifrar" | Falta `master.key` o quedó ilegible | Verificar `/etc/tsi_authenticator/master.key` (`0400`, root); re-enrolar si se perdió |
 | Código válido rechazado al reintentar | No-Replay (código ya usado) | Esperar el siguiente código |
 | "Demasiados intentos fallidos" | Rate-limit activo | Esperar `LOCK_TIME`, o `LOCKED_UNTIL=0` en `/var/lib/tsi_authenticator/<uid>_tsi_config` (root) |
 | El QR no aparece | Falta `qrencode` | Instalar `qrencode` |
@@ -232,8 +251,8 @@ pamtester tsi-test $USER authenticate
 ## 12. Desinstalación
 
 ```bash
-sudo make uninstall     # quita del sistema: tsi-enroll, tsi-config-init, el .so y /var/lib/tsi_authenticator
+sudo make uninstall     # quita el .so, los helpers, /var/lib/tsi_authenticator y la política SELinux
 make remove             # además de uninstall, borra los binarios locales (equivale a uninstall + clean)
 ```
 
-`uninstall` elimina también `/var/lib/tsi_authenticator/` (con la config/estado de todos los usuarios). Los secretos en cada `~/.tsi_authenticator` no se tocan; borrarlos por separado si se desea.
+`uninstall` elimina el módulo, los helpers, `/var/lib/tsi_authenticator/` (config/estado de todos los usuarios) y la política SELinux. **No** borra la clave maestra `/etc/tsi_authenticator/master.key` ni los secretos en cada `~/.tsi_authenticator`; borrarlos por separado si se desea.

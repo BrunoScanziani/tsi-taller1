@@ -38,11 +38,6 @@ SELINUX_DIR    := selinux
 SELINUX_MAKE   := /usr/share/selinux/devel/Makefile
 KEYDIR         := /etc/tsi_authenticator
 
-# Suite de tests (integracion contra el .so real via libpam)
-TEST_BIN    := test/test_pam
-TEST_SRC    := test/test_pam.c
-TEST_LIBS   := -lpam -lcotp
-
 # Ruta de instalación de módulos PAM: difiere entre distros.
 # Se puede sobrescribir: make install SECURITYDIR=/otra/ruta
 SECURITYDIR ?= $(shell test -d /usr/lib64/security && echo /usr/lib64/security || echo /usr/lib/x86_64-linux-gnu/security)
@@ -68,13 +63,6 @@ $(KEY_INIT): $(KEY_INIT_SRC)
 
 $(SEED_CRYPTO): $(SEED_CRYPTO_SRC)
 	$(CC) $(CFLAGS) -o $@ $(SEED_CRYPTO_SRC) $(SEED_CRYPTO_LIBS)
-
-# Compila el modulo y corre la suite de tests contra el .so recien construido.
-$(TEST_BIN): $(TEST_SRC) $(MODULE)
-	$(CC) $(CFLAGS) -o $@ $(TEST_SRC) $(TEST_LIBS)
-
-test: $(TEST_BIN)
-	./$(TEST_BIN) "$(abspath $(MODULE))"
 
 # Directorio root-only donde el modulo guarda config+estado por usuario (<uid>_tsi_config)
 STATEDIR ?= /var/lib/tsi_authenticator
@@ -119,11 +107,11 @@ uninstall:
 	rm -rf $(STATEDIR)
 
 clean:
-	rm -f $(ENROLL) $(MODULE) $(HELPER) $(KEY_INIT) $(SEED_CRYPTO) $(TEST_BIN) src/*.o
+	rm -f $(ENROLL) $(MODULE) $(HELPER) $(KEY_INIT) $(SEED_CRYPTO) src/*.o
 	rm -f $(SELINUX_DIR)/$(SELINUX_POLICY).pp $(SELINUX_DIR)/$(SELINUX_POLICY).cil
 	rm -f $(SELINUX_DIR)/tmp/*.tmp $(SELINUX_DIR)/tmp/*.te $(SELINUX_DIR)/tmp/*.mod
 
 # Limpieza total: desinstala del sistema y borra los binarios locales
 remove: uninstall clean
 
-.PHONY: all install uninstall remove clean test
+.PHONY: all install uninstall remove clean

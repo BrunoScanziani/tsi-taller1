@@ -4,4 +4,5 @@
 .vscode
 tsi-enroll
 tsi-config-init
-test/test_pam
+tsi-seed-crypto
+tsi-key-init

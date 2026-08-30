@@ -29,7 +29,7 @@ tsi-enroll
 Provee un segundo factor TOTP para servicios PAM (típicamente SSH). Implementa el grupo `auth`. En cada autenticación:
 
 1. Resuelve el usuario.
-2. Baja privilegios al usuario y lee el `SECRET` de su home (`~/.tsi_authenticator`); restaura privilegios.
+2. Baja privilegios al usuario y lee el secreto **cifrado** de su home (`~/.tsi_authenticator`); restaura privilegios y lo descifra como root con la clave maestra (`/etc/tsi_authenticator/master.key`).
 3. Como root, lee la config y el estado del archivo root-only (`/var/lib/tsi_authenticator/<uid>_tsi_config`). Si ese archivo **no existe** (usuario no enrolado correctamente), deniega.
 4. **Rate-limit:** si el usuario está bloqueado (`LOCKED_UNTIL` en el futuro), deniega sin pedir el código.
 5. Solicita el código TOTP (sin eco).
@@ -46,6 +46,7 @@ El archivo root-only lo crea `tsi-enroll` al enrolar (mediante el helper setuid 
 - **Dígitos:** 8.
 - **Período:** 30 s.
 - **Ventana de tolerancia:** 3 códigos (actual, anterior, posterior).
+- **Cifrado del seed en reposo:** AES-256-GCM, con la clave maestra del sistema.
 
 ---
 
@@ -59,13 +60,9 @@ El archivo root-only lo crea `tsi-enroll` al enrolar (mediante el helper setuid 
 
 ## FILES
 
-**`~/.tsi_authenticator`** — solo el secreto. Permisos `0600`, propiedad del **usuario** (lo crea `tsi-enroll`):
+**`~/.tsi_authenticator`** — el seed TOTP **cifrado** (blob binario AES-256-GCM: versión + nonce + tag + ciphertext). Permisos `0600`, propiedad del **usuario** (lo crea `tsi-enroll`). No es texto legible; solo se descifra con la clave maestra. El cifrado liga el blob a la versión y al UID, así que no sirve copiado a otro usuario.
 
-```
-SECRET=<Base32>
-```
-
-- `SECRET` — secreto TOTP en Base32. **No divulgar.**
+**`/etc/tsi_authenticator/master.key`** — clave maestra AES-256 (32 bytes). Permisos `0400`, propiedad de **root**, en un directorio `0700` de root. La crea `tsi-key-init` en la instalación. El módulo solo la lee; **no divulgar ni perder** (sin ella los seeds no se descifran).
 
 **`/var/lib/tsi_authenticator/<uid>_tsi_config`** — config y estado por usuario. Permisos `0600`, propiedad de **root** (el usuario no puede leerlo ni editarlo). Lo crea `tsi-enroll` al enrolar (vía el helper setuid `tsi-config-init`), con los valores por defecto; el `USED_CODE` aparece recién en el primer login exitoso:
 
@@ -93,9 +90,12 @@ Estado gestionado por el módulo (**no editar**):
 Otras rutas:
 
 - **`pam_tsi_authenticator.so`** — Ubuntu: `/usr/lib/x86_64-linux-gnu/security/`; Rocky: `/usr/lib64/security/`.
-- **`/usr/local/bin/tsi-config-init`** — helper setuid root que crea el archivo de config. Permisos `4755`.
+- **`/usr/local/bin/tsi-config-init`** — helper setuid root (`4755`) que crea el archivo de config del usuario.
+- **`/usr/local/bin/tsi-seed-crypto`** — helper setuid root (`4755`) que cifra el seed con la clave maestra durante el enroll.
+- **`/usr/local/sbin/tsi-key-init`** — crea la clave maestra; lo corre la instalación una vez, como root.
 - **`/etc/pam.d/sshd`** — activación del módulo para SSH.
 - **`/etc/ssh/sshd_config`** (o `sshd_config.d/`) — flujo interactivo de SSH.
+- **SELinux (Rocky/RHEL):** módulo de política `tsi_authenticator` que habilita a SSH leer la clave maestra y leer/escribir el estado. Lo instala `make install`.
 
 ---
 
@@ -103,7 +103,7 @@ Otras rutas:
 
 ### Habilitar 2FA para un usuario
 
-El usuario ejecuta `tsi-enroll` (sin `sudo`), escanea el QR con una app de 8 dígitos (Aegis, FreeOTP, Raivo, 2FAS) y confirma con un código. Al confirmar, `tsi-enroll` crea el secreto en su home y, mediante el helper setuid, el archivo de config root-only.
+El usuario ejecuta `tsi-enroll` (sin `sudo`), escanea el QR con una app de 8 dígitos (Aegis, FreeOTP, Raivo, 2FAS) y confirma con un código. Al confirmar, `tsi-enroll` guarda el seed **cifrado** en su home (vía `tsi-seed-crypto`) y crea el archivo de config root-only (vía `tsi-config-init`).
 
 Re-enrolar (volver a correr `tsi-enroll`) genera un secreto nuevo pero **conserva** el archivo de config existente: no resetea el contador de fallos ni un bloqueo activo. Para partir de cero, borrar antes el config (ver más abajo).
 
@@ -191,8 +191,10 @@ sudo systemctl restart sshd     # en Ubuntu puede ser 'ssh'
 - **Helper setuid mínimo.** El archivo de config lo crea `tsi-config-init`, un helper setuid root chico y sin dependencias de crypto. Toma el uid objetivo de `getuid()` (nunca de argumentos: un usuario solo crea su propio archivo), arma la ruta con la constante compilada (ignora entorno y `statedir=`), y crea el archivo con `O_EXCL`: **si ya existe no lo pisa**, por lo que un usuario no puede correrlo para resetear su bloqueo ni la política del admin.
 - **No-Replay.** Un código válido no puede reutilizarse mientras siga vigente: el módulo guarda los códigos usados (root-only) y rechaza cualquier repetición. Las entradas vencidas se purgan automáticamente y el archivo se reescribe de forma atómica (temporal + `rename`). Un replay cuenta como intento fallido.
 - **Rate-limit.** Tras `RATE_LIMIT` fallos consecutivos el acceso se bloquea `LOCK_TIME` segundos; durante el bloqueo se deniega sin pedir el código.
-- **Protección del secreto.** El `SECRET` vive en el home del usuario (`0600`); lo pueden leer el usuario propietario y root. La app ya lo posee, así que el usuario conocerlo no agrega riesgo; el punto sensible (estado/config) quedó fuera de su alcance.
-- **Reducción de privilegios.** Para leer el secreto del home el módulo baja a la identidad del usuario; el archivo root-only lo maneja como root. Nunca opera como root sobre rutas que el usuario controla.
+- **Seed cifrado en reposo.** El seed se guarda en el home cifrado con AES-256-GCM (cifrado autenticado: detecta manipulación) bajo una clave maestra que solo root puede leer (`0400`). Ni el usuario dueño del archivo puede recuperar el seed, aunque la app ya lo tenga. El cifrado incluye como datos autenticados la versión y el UID, de modo que un blob no sirve movido a otro usuario.
+- **Clave maestra.** Vive en `/etc/tsi_authenticator/master.key`, `0400` root, en un directorio `0700` root. La genera `tsi-key-init` con el generador aleatorio de libgcrypt. Comprometerla o perderla compromete/inutiliza todos los seeds.
+- **Reducción de privilegios.** Para leer el archivo del home el módulo baja a la identidad del usuario; la clave maestra y el archivo root-only los maneja como root. Nunca opera como root sobre rutas que el usuario controla.
+- **SELinux (Rocky/RHEL).** SELinux confina por dominio: sin política, la sesión SSH no puede leer la clave maestra ni el estado (falla silenciosa). El módulo de política `tsi_authenticator` habilita a `sshd_session_t` solo lo necesario (leer la clave; leer/escribir el estado). Es específico de SSH: otros servicios PAM (login local, `sudo`) correrían en otro dominio y requerirían política adicional.
 - **Higiene de memoria.** Secretos y códigos se sobrescriben con `explicit_bzero`.
 - **Manejo de symlinks.** Ambos archivos se abren con `O_NOFOLLOW`; si alguno es un symlink se rechaza (falla seguro).
 - **Resistencia a fuerza bruta.** 8 dígitos (10^8) y ventana 3 ⇒ probabilidad 3/10^8 por intento. Depende además de los controles del servidor.

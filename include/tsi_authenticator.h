@@ -19,7 +19,7 @@
 #define FAIL_COUNT_KEY "FAIL_COUNT"          /* estado: fallos consecutivos */
 #define LOCKED_UNTIL_KEY "LOCKED_UNTIL"      /* estado: epoch hasta el que esta bloqueado */
 #define MAX_USED_ENTRIES 50
-#define CODE_MAX_AGE 150                     /* 3 minutos en segundos */
+#define CODE_MAX_AGE 600                     /* 10 minutos en segundos */
 
 #define SECRET_FILENAME ".tsi_authenticator" /* nombre del archivo en el home */
 #define SECRET_BITS_NUMBER 160               /* Cantidad de bits del secreto */
